@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Garage</title>
+  <script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      min-height: 100dvh;
+      background: #111;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+      color: #fff;
+      gap: 28px;
+    }
+    #btn {
+      width: 220px;
+      height: 220px;
+      border-radius: 50%;
+      border: none;
+      font-size: 1.4rem;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      cursor: pointer;
+      background: #2ecc71;
+      color: #fff;
+      box-shadow: 0 0 40px rgba(46,204,113,0.35);
+      transition: transform 0.08s ease, background 0.25s ease, box-shadow 0.25s ease;
+      -webkit-tap-highlight-color: transparent;
+    }
+    #btn:active { transform: scale(0.93); }
+    #btn.connecting {
+      background: #555;
+      box-shadow: none;
+      cursor: default;
+    }
+    #btn.triggered {
+      background: #e67e22;
+      box-shadow: 0 0 40px rgba(230,126,34,0.45);
+    }
+    #btn.error {
+      background: #e74c3c;
+      box-shadow: 0 0 40px rgba(231,76,60,0.35);
+    }
+    #status {
+      font-size: 0.85rem;
+      color: #666;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+  </style>
+</head>
+<body>
+  <button id="btn" class="connecting" disabled>Connecting…</button>
+  <div id="status">Connecting to broker</div>
+
+  <script>
+    // ── Config ─────────────────────────────────────────────────────────────────
+    const BROKER = 'wss://6fa8eefe176b41d887156c22fa358e2f.s1.eu.hivemq.cloud:8884/mqtt';
+    const USER   = 'pants';
+    const PASS   = 'Incarnations1224';
+    const TOPIC  = 'garage/trigger';
+    // ───────────────────────────────────────────────────────────────────────────
+
+    const btn    = document.getElementById('btn');
+    const status = document.getElementById('status');
+
+    const client = mqtt.connect(BROKER, {
+      username: USER,
+      password: PASS,
+      clientId: 'web-' + Math.random().toString(16).slice(2),
+      reconnectPeriod: 3000,
+    });
+
+    client.on('connect', () => {
+      btn.textContent = 'Open Garage';
+      btn.className = '';
+      btn.disabled = false;
+      status.textContent = 'Connected';
+    });
+
+    client.on('offline', () => {
+      btn.textContent = 'Reconnecting…';
+      btn.className = 'connecting';
+      btn.disabled = true;
+      status.textContent = 'Disconnected — retrying';
+    });
+
+    client.on('error', (err) => {
+      btn.textContent = 'Error';
+      btn.className = 'error';
+      btn.disabled = true;
+      status.textContent = err.message;
+    });
+
+    btn.addEventListener('click', () => {
+      if (!client.connected) return;
+      client.publish(TOPIC, '1');
+      btn.className = 'triggered';
+      btn.textContent = 'Sent!';
+      status.textContent = 'Trigger sent';
+      setTimeout(() => {
+        btn.className = '';
+        btn.textContent = 'Open Garage';
+        status.textContent = 'Connected';
+      }, 1500);
+    });
+  </script>
+</body>
+</html>
