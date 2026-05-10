@@ -1,0 +1,7 @@
+{
+  "name": "garage-door",
+  "version": "1.0.0",
+  "dependencies": {
+    "mqtt": "^5.10.1"
+  }
+}
