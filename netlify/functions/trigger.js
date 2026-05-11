@@ -1,5 +1,8 @@
 const mqtt = require('mqtt');
 
+const ACK_TIMEOUT_MS = 4000;
+const CONNECT_TIMEOUT_MS = 6000;
+
 exports.handler = async (event) => {
   const headers = {
     'Access-Control-Allow-Origin': '*',
@@ -26,17 +29,31 @@ exports.handler = async (event) => {
   });
 
   return new Promise((resolve) => {
-    const bail = (code, msg) => { client.end(true); resolve({ statusCode: code, headers, body: JSON.stringify({ error: msg }) }); };
-    const timer = setTimeout(() => bail(504, 'Timeout'), 8000);
+    let settled = false;
+    const settle = (statusCode, body) => {
+      if (settled) return;
+      settled = true;
+      client.end(true);
+      resolve({ statusCode, headers, body: JSON.stringify(body) });
+    };
+
+    const connectTimer = setTimeout(() => settle(504, { error: 'Connect timeout' }), CONNECT_TIMEOUT_MS);
 
     client.on('connect', () => {
-      client.publish('garage/trigger', '1', { qos: 1 }, (err) => {
-        clearTimeout(timer);
-        client.end();
-        resolve({ statusCode: err ? 500 : 200, headers, body: JSON.stringify(err ? { error: err.message } : { ok: true }) });
+      clearTimeout(connectTimer);
+      client.subscribe('garage/ack', { qos: 1 }, (subErr) => {
+        if (subErr) return settle(500, { error: subErr.message });
+        client.publish('garage/trigger', '1', { qos: 1 }, (pubErr) => {
+          if (pubErr) return settle(500, { error: pubErr.message });
+          setTimeout(() => settle(200, { ok: true, confirmed: false, reason: 'timeout' }), ACK_TIMEOUT_MS);
+        });
       });
     });
 
-    client.on('error', (err) => { clearTimeout(timer); bail(500, err.message); });
+    client.on('message', (topic) => {
+      if (topic === 'garage/ack') settle(200, { ok: true, confirmed: true });
+    });
+
+    client.on('error', (err) => settle(500, { error: err.message }));
   });
 };

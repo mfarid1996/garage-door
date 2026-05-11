@@ -37,6 +37,7 @@
     #btn:active  { transform: scale(0.93); }
     #btn.sending { background: #e67e22; box-shadow: 0 0 40px rgba(230,126,34,0.45); cursor: default; }
     #btn.done    { background: #2ecc71; box-shadow: 0 0 40px rgba(46,204,113,0.35); cursor: default; }
+    #btn.warn    { background: #f1c40f; box-shadow: 0 0 40px rgba(241,196,15,0.40); cursor: default; }
     #btn.error   { background: #e74c3c; box-shadow: 0 0 40px rgba(231,76,60,0.35); }
     #status { font-size: 0.85rem; color: #666; letter-spacing: 0.04em; text-transform: uppercase; }
     #setup-wrap {
@@ -219,9 +220,16 @@
           });
 
           if (res.ok) {
-            btn.textContent = 'Sent!';
-            btn.classList.replace('sending', 'done');
-            status.textContent = 'Done';
+            const data = await res.json().catch(() => ({}));
+            if (data.confirmed) {
+              btn.textContent = 'Opened';
+              btn.classList.replace('sending', 'done');
+              status.textContent = 'Garage confirmed';
+            } else {
+              btn.textContent = 'No reply';
+              btn.classList.replace('sending', 'warn');
+              status.textContent = 'Sent — no garage response';
+            }
           } else if (res.status === 401) {
             btn.textContent = 'Not Authorised';
             btn.classList.replace('sending', 'error');
@@ -238,7 +246,7 @@
         }
 
         setTimeout(() => {
-          btn.classList.remove('sending', 'error', 'done');
+          btn.classList.remove('sending', 'error', 'done', 'warn');
           btn.textContent = 'Open Garage';
           status.textContent = 'Ready';
         }, 1500);
@@ -264,9 +272,16 @@
         if (gen !== myGen) return;
 
         if (res.ok) {
-          btn.textContent = 'Done!';
-          btn.classList.replace('sending', 'done');
-          status.textContent = 'Signal sent';
+          const data = await res.json().catch(() => ({}));
+          if (data.confirmed) {
+            btn.textContent = 'Opened';
+            btn.classList.replace('sending', 'done');
+            status.textContent = 'Garage confirmed';
+          } else {
+            btn.textContent = 'No reply';
+            btn.classList.replace('sending', 'warn');
+            status.textContent = 'Sent — no garage response';
+          }
         } else if (res.status === 401) {
           btn.textContent = 'Not Authorised';
           btn.classList.replace('sending', 'error');
