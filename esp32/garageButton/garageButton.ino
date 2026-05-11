@@ -13,18 +13,31 @@ Servo servo;
 WiFiClientSecure net;
 PubSubClient mqtt(net);
 
+// Ease-in-out sweep: speed ramps up, peaks at midpoint, ramps down.
+void sweepServo(int from, int to) {
+  const int steps = 60;
+  const int stepDelayMs = 3;
+  for (int i = 0; i <= steps; i++) {
+    float t = (float)i / steps;
+    float eased = 0.5f - 0.5f * cos(PI * t);
+    int pos = from + (int)((to - from) * eased + 0.5f);
+    servo.write(pos);
+    delay(stepDelayMs);
+  }
+}
+
 void onMessage(char* topic, byte* payload, unsigned int len) {
-  // Blink 3 times to confirm trigger received
+  sweepServo(90, 120);
+  delay(1000);
+  sweepServo(120, 90);
+
+  // Blink 3 times to confirm trigger handled
   for (int i = 0; i < 3; i++) {
     digitalWrite(LED_PIN, HIGH); delay(150);
     digitalWrite(LED_PIN, LOW);  delay(150);
   }
-  // Rotate servo 30° forward, wait 1s, return
-  servo.write(120);
-  delay(1000);
-  servo.write(90);
 
-  Serial.println("Trigger received — LED blinked, servo actuated");
+  Serial.println("Trigger received — servo actuated, LED blinked");
 }
 
 void connectMQTT() {
