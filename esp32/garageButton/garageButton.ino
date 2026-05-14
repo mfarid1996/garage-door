@@ -16,7 +16,7 @@ PubSubClient mqtt(net);
 // Constant-speed sweep.
 void sweepServo(int from, int to) {
   const int steps = 60;
-  const int stepDelayMs = 2;
+  const int stepDelayMs = 1;
   for (int i = 0; i <= steps; i++) {
     float t = (float)i / steps;
     int pos = from + (int)((to - from) * t + 0.5f);
