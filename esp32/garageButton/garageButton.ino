@@ -13,14 +13,13 @@ Servo servo;
 WiFiClientSecure net;
 PubSubClient mqtt(net);
 
-// Ease-in-out sweep: speed ramps up, peaks at midpoint, ramps down.
+// Constant-speed sweep.
 void sweepServo(int from, int to) {
   const int steps = 60;
-  const int stepDelayMs = 3;
+  const int stepDelayMs = 2;
   for (int i = 0; i <= steps; i++) {
     float t = (float)i / steps;
-    float eased = 0.5f - 0.5f * cos(PI * t);
-    int pos = from + (int)((to - from) * eased + 0.5f);
+    int pos = from + (int)((to - from) * t + 0.5f);
     servo.write(pos);
     delay(stepDelayMs);
   }
