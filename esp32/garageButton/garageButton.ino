@@ -29,9 +29,9 @@ void sweepServo(int from, int to) {
 void onMessage(char* topic, byte* payload, unsigned int len) {
   mqtt.publish("garage/ack", "1");  // immediate ack on receive
 
-  sweepServo(90, 30);
+  sweepServo(90, 15);
   delay(1000);
-  sweepServo(30, 90);
+  sweepServo(15, 90);
 
   // Blink 3 times to confirm trigger handled
   for (int i = 0; i < 3; i++) {
