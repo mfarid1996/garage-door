@@ -224,7 +224,7 @@
             if (data.confirmed) {
               btn.textContent = 'Opened';
               btn.classList.replace('sending', 'done');
-              status.textContent = 'Garage confirmed';
+              status.textContent = 'ESP32 confirmed' + (data.message ? ': ' + data.message : '');
             } else {
               btn.textContent = 'No reply';
               btn.classList.replace('sending', 'warn');

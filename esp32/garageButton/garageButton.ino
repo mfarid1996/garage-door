@@ -27,7 +27,9 @@ void sweepServo(int from, int to) {
 }
 
 void onMessage(char* topic, byte* payload, unsigned int len) {
-  mqtt.publish("garage/ack", "1");  // immediate ack on receive
+  char ackMsg[64];
+  snprintf(ackMsg, sizeof(ackMsg), "trigger received, uptime %lus", millis() / 1000);
+  mqtt.publish("garage/ack", ackMsg);  // immediate ack on receive
 
   sweepServo(90, 15);
   delay(1000);

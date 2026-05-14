@@ -50,8 +50,10 @@ exports.handler = async (event) => {
       });
     });
 
-    client.on('message', (topic) => {
-      if (topic === 'garage/ack') settle(200, { ok: true, confirmed: true });
+    client.on('message', (topic, payload) => {
+      if (topic === 'garage/ack') {
+        settle(200, { ok: true, confirmed: true, message: payload.toString() });
+      }
     });
 
     client.on('error', (err) => settle(500, { error: err.message }));
