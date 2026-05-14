@@ -13,26 +13,20 @@ Servo servo;
 WiFiClientSecure net;
 PubSubClient mqtt(net);
 
-// Constant-speed sweep.
-void sweepServo(int from, int to) {
-  const int steps = 60;
-  const int stepDelayMs = 1;
-  for (int i = 0; i <= steps; i++) {
-    float t = (float)i / steps;
-    int pos = from + (int)((to - from) * t + 0.5f);
-    servo.write(pos);
-    delay(stepDelayMs);
-  }
-}
+// Single-shot move: lets the servo run at its full mechanical speed.
+// SERVO_MOVE_MS is the worst-case time for it to physically arrive.
+const int SERVO_MOVE_MS = 200;
 
 void onMessage(char* topic, byte* payload, unsigned int len) {
   char ackMsg[64];
   snprintf(ackMsg, sizeof(ackMsg), "trigger received, uptime %lus", millis() / 1000);
   mqtt.publish("garage/ack", ackMsg);  // immediate ack on receive
 
-  sweepServo(90, 15);
+  servo.write(15);
+  delay(SERVO_MOVE_MS);
   delay(1000);
-  sweepServo(15, 90);
+  servo.write(90);
+  delay(SERVO_MOVE_MS);
 
   // Blink 3 times to confirm trigger handled
   for (int i = 0; i < 3; i++) {
