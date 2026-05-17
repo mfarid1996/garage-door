@@ -74,32 +74,6 @@
       letter-spacing: 0.03em;
     }
     #setup-err { color: #e74c3c; font-size: 0.8rem; min-height: 1em; }
-    #countdown-number {
-      font-size: 9rem;
-      font-weight: 700;
-      color: #2ecc71;
-      line-height: 1;
-      text-shadow: 0 0 60px rgba(46,204,113,0.55);
-    }
-    #countdown-label {
-      font-size: 0.8rem;
-      color: #555;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-    }
-    #cancel-btn {
-      padding: 14px 48px;
-      border-radius: 40px;
-      border: 2px solid #444;
-      background: transparent;
-      color: #888;
-      font-size: 1rem;
-      font-weight: 600;
-      letter-spacing: 0.04em;
-      cursor: pointer;
-      -webkit-tap-highlight-color: transparent;
-    }
-    #cancel-btn:active { border-color: #fff; color: #fff; }
   </style>
 </head>
 <body>
@@ -118,7 +92,6 @@
     }
 
     let gen = 0;
-    let currentTick = null;
     let visListenerAdded = false;
 
     token ? initApp() : showSetupScreen();
@@ -128,11 +101,11 @@
                       || window.navigator.standalone === true;
 
       if (standalone) {
-        startCountdown();
+        fireTrigger(++gen);
         if (!visListenerAdded) {
           visListenerAdded = true;
           document.addEventListener('visibilitychange', () => {
-            if (document.visibilityState === 'visible') startCountdown();
+            if (document.visibilityState === 'visible') fireTrigger(++gen);
           });
         }
       } else {
@@ -166,37 +139,6 @@
 
       input.addEventListener('input', () => { if (input.value.includes('?t=')) tryToken(input.value); });
       document.getElementById('setup-btn').addEventListener('click', () => tryToken(input.value));
-    }
-
-    function startCountdown() {
-      const myGen = ++gen;
-      clearInterval(currentTick);
-      let secs = 2;
-
-      document.body.innerHTML = `
-        <div id="countdown-label">Opening in</div>
-        <div id="countdown-number">${secs}</div>
-        <button id="cancel-btn">Cancel</button>`;
-
-      const numEl = document.getElementById('countdown-number');
-
-      document.getElementById('cancel-btn').addEventListener('click', () => {
-        if (gen !== myGen) return;
-        gen++;
-        clearInterval(currentTick);
-        showButtonUI();
-      });
-
-      currentTick = setInterval(() => {
-        if (gen !== myGen) { clearInterval(currentTick); return; }
-        secs--;
-        if (secs > 0) {
-          numEl.textContent = secs;
-        } else {
-          clearInterval(currentTick);
-          fireTrigger(myGen);
-        }
-      }, 1000);
     }
 
     function showButtonUI() {
