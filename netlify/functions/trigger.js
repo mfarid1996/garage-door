@@ -1,6 +1,6 @@
 const mqtt = require('mqtt');
 
-const ACK_TIMEOUT_MS = 4000;
+const ACK_TIMEOUT_MS = 8000;
 const CONNECT_TIMEOUT_MS = 6000;
 
 exports.handler = async (event) => {
