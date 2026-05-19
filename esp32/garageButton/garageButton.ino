@@ -104,8 +104,14 @@ void connectMQTT() {
     if (firstAttempt || millis() - lastAttempt >= backoff) {
       firstAttempt = false;
       Serial.print("Connecting to MQTT...");
-      if (mqtt.connect("esp32-garage", MQTT_USER, MQTT_PASS)) {
+      // cleanSession=false: broker holds our subscription + queues triggers while we're offline.
+      // LWT publishes "offline" (retained) to garage/status if our connection drops ungracefully.
+      if (mqtt.connect("esp32-garage",
+                       MQTT_USER, MQTT_PASS,
+                       "garage/status", 1, true, "offline",
+                       false)) {
         Serial.println(" connected");
+        mqtt.publish("garage/status", "online", true);  // overwrite the will while we're up
         mqtt.subscribe(MQTT_TOPIC);
         return;
       }

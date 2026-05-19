@@ -40,6 +40,26 @@
     #btn.warn    { background: #f1c40f; box-shadow: 0 0 40px rgba(241,196,15,0.40); cursor: default; }
     #btn.error   { background: #e74c3c; box-shadow: 0 0 40px rgba(231,76,60,0.35); }
     #status { font-size: 0.85rem; color: #666; letter-spacing: 0.04em; text-transform: uppercase; }
+    #conn {
+      font-size: 0.7rem;
+      color: #666;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: -16px;
+    }
+    #conn::before {
+      content: '';
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #555;
+      transition: background 0.2s ease;
+    }
+    #conn.online::before  { background: #2ecc71; box-shadow: 0 0 6px rgba(46,204,113,0.6); }
+    #conn.offline::before { background: #e74c3c; box-shadow: 0 0 6px rgba(231,76,60,0.5); }
     #setup-wrap {
       display: flex;
       flex-direction: column;
@@ -93,10 +113,14 @@
 
     let gen = 0;
     let visListenerAdded = false;
+    let connState = 'unknown';   // 'unknown' | 'online' | 'offline'
+    let statusFeedStarted = false;
 
     token ? initApp() : showSetupScreen();
 
     function initApp() {
+      startStatusFeed();
+
       const standalone = window.matchMedia('(display-mode: standalone)').matches
                       || window.navigator.standalone === true;
 
@@ -111,6 +135,55 @@
       } else {
         showButtonUI();
       }
+    }
+
+    function applyConnUI() {
+      const el = document.getElementById('conn');
+      if (!el) return;
+      if (connState === 'online')       { el.textContent = 'Garage online';  el.className = 'online';  }
+      else if (connState === 'offline') { el.textContent = 'Garage offline'; el.className = 'offline'; }
+      else                              { el.textContent = 'Checking…';      el.className = '';        }
+    }
+
+    function startStatusFeed() {
+      if (statusFeedStarted || !token) return;
+      statusFeedStarted = true;
+
+      fetch('/.netlify/functions/wss-creds', {
+        headers: { 'Authorization': 'Bearer ' + token },
+      })
+        .then(r => r.ok ? r.json() : Promise.reject(new Error('creds ' + r.status)))
+        .then(creds => loadMqttLib().then(() => openStatusFeed(creds)))
+        .catch(() => {});  // status indicator stays "Checking…" — the trigger button still works
+    }
+
+    function loadMqttLib() {
+      if (window.mqtt) return Promise.resolve();
+      return new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = 'https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js';
+        s.onload  = resolve;
+        s.onerror = () => reject(new Error('mqtt.js failed to load'));
+        document.head.appendChild(s);
+      });
+    }
+
+    function openStatusFeed({ url, username, password, topic }) {
+      const client = mqtt.connect(url, {
+        username,
+        password,
+        clean: true,            // we don't need a persistent session for the browser
+        reconnectPeriod: 5000,
+        keepalive: 60,
+      });
+      client.on('connect', () => client.subscribe(topic));
+      client.on('message', (t, payload) => {
+        if (t !== topic) return;
+        connState = payload.toString() === 'online' ? 'online' : 'offline';
+        applyConnUI();
+      });
+      client.on('close', () => { connState = 'unknown'; applyConnUI(); });
+      client.on('error', () => {});  // mqtt.js will keep retrying
     }
 
     function showSetupScreen() {
@@ -144,7 +217,9 @@
     function showButtonUI() {
       document.body.innerHTML = `
         <button id="btn">Open Garage</button>
-        <div id="status">Ready</div>`;
+        <div id="status">Ready</div>
+        <div id="conn">Checking…</div>`;
+      applyConnUI();
 
       const btn    = document.getElementById('btn');
       const status = document.getElementById('status');
