@@ -44,6 +44,13 @@
     #btn.done    { background: #2ecc71; box-shadow: 0 0 40px rgba(46,204,113,0.35); cursor: default; }
     #btn.warn    { background: #f1c40f; box-shadow: 0 0 40px rgba(241,196,15,0.40); cursor: default; }
     #btn.error   { background: #e74c3c; box-shadow: 0 0 40px rgba(231,76,60,0.35); }
+    #btn.cooldown {
+      background: #444;
+      color: #999;
+      box-shadow: 0 0 20px rgba(0,0,0,0.4);
+      cursor: not-allowed;
+    }
+    #btn:disabled { cursor: not-allowed; }
     #status { font-size: 0.85rem; color: #666; letter-spacing: 0.04em; text-transform: uppercase; }
     #conn {
       position: fixed;
@@ -126,6 +133,62 @@
     let connState = 'unknown';   // 'unknown' | 'online' | 'offline'
     let statusFeedStarted = false;
 
+    const COOLDOWN_MS = 10000;
+    let buttonState = null;            // 'idle' | 'idle-offline' | 'sending' | 'result' | 'cooldown'
+    let cooldownTimer = null;
+
+    function cooldownRemainingMs() {
+      const last = parseInt(localStorage.getItem('garage_last_trigger_ms') || '0', 10);
+      if (!last) return 0;
+      return Math.max(0, COOLDOWN_MS - (Date.now() - last));
+    }
+
+    function applyButtonState() {
+      // Sending and result are transient — they manage themselves and call applyButtonState() when done.
+      if (buttonState === 'sending' || buttonState === 'result') return;
+
+      const btn    = document.getElementById('btn');
+      const status = document.getElementById('status');
+      if (!btn || !status) return;  // setup screen is showing — nothing to gate
+
+      if (cooldownTimer) { clearInterval(cooldownTimer); cooldownTimer = null; }
+      btn.classList.remove('sending', 'done', 'warn', 'error', 'cooldown');
+
+      const remaining = cooldownRemainingMs();
+      if (remaining > 0) {
+        buttonState = 'cooldown';
+        btn.classList.add('cooldown');
+        btn.disabled = true;
+        btn.textContent = 'Wait ' + Math.ceil(remaining / 1000) + 's';
+        status.textContent = '';
+        cooldownTimer = setInterval(() => {
+          const rem = cooldownRemainingMs();
+          if (rem <= 0) {
+            clearInterval(cooldownTimer);
+            cooldownTimer = null;
+            buttonState = null;
+            applyButtonState();
+            return;
+          }
+          btn.textContent = 'Wait ' + Math.ceil(rem / 1000) + 's';
+        }, 250);
+        return;
+      }
+
+      if (connState === 'online') {
+        buttonState = 'idle';
+        btn.disabled = false;
+        btn.textContent = 'Open Garage';
+        status.textContent = 'Ready';
+      } else {
+        buttonState = 'idle-offline';
+        btn.classList.add('cooldown');  // reuse greyed style
+        btn.disabled = true;
+        btn.textContent = 'Garage offline';
+        status.textContent = '';
+      }
+    }
+
     token ? initApp() : showSetupScreen();
 
     function initApp() {
@@ -149,10 +212,12 @@
 
     function applyConnUI() {
       const el = document.getElementById('conn');
-      if (!el) return;
-      if (connState === 'online')       { el.textContent = 'Garage online';  el.className = 'online';  }
-      else if (connState === 'offline') { el.textContent = 'Garage offline'; el.className = 'offline'; }
-      else                              { el.textContent = 'Checking…';      el.className = '';        }
+      if (el) {
+        if (connState === 'online')       { el.textContent = 'Garage online';  el.className = 'online';  }
+        else if (connState === 'offline') { el.textContent = 'Garage offline'; el.className = 'offline'; }
+        else                              { el.textContent = 'Checking…';      el.className = '';        }
+      }
+      applyButtonState();
     }
 
     function startStatusFeed() {
@@ -228,67 +293,94 @@
       document.getElementById('stage').innerHTML = `
         <button id="btn">Open Garage</button>
         <div id="status">Ready</div>`;
-      applyConnUI();
+
+      const btn = document.getElementById('btn');
+      btn.addEventListener('click', onButtonClick);
+      applyButtonState();
+    }
+
+    async function onButtonClick() {
+      if (buttonState !== 'idle') return;
 
       const btn    = document.getElementById('btn');
       const status = document.getElementById('status');
 
-      btn.addEventListener('click', async () => {
-        if (btn.classList.contains('sending')) return;
-        btn.classList.add('sending');
-        btn.textContent = 'Sending…';
-        status.textContent = '';
+      buttonState = 'sending';
+      btn.classList.remove('done', 'warn', 'error', 'cooldown');
+      btn.classList.add('sending');
+      btn.disabled = true;
+      btn.textContent = 'Sending…';
+      status.textContent = '';
 
-        try {
-          const res = await fetch('/.netlify/functions/trigger', {
-            method: 'POST',
-            headers: { 'Authorization': 'Bearer ' + token },
-          });
+      localStorage.setItem('garage_last_trigger_ms', String(Date.now()));
 
-          if (res.ok) {
-            const data = await res.json().catch(() => ({}));
-            if (data.confirmed) {
-              btn.textContent = 'Opened';
-              btn.classList.replace('sending', 'done');
-              status.textContent = 'ESP32 confirmed' + (data.message ? ': ' + data.message : '');
-            } else {
-              btn.textContent = 'No reply';
-              btn.classList.replace('sending', 'warn');
-              status.textContent = 'Sent — no garage response';
-            }
-          } else if (res.status === 401) {
-            btn.textContent = 'Not Authorised';
-            btn.classList.replace('sending', 'error');
-            status.textContent = 'Token rejected';
-            return;
+      let resultClass = '', resultText = '', resultStatus = '';
+      try {
+        const res = await fetch('/.netlify/functions/trigger', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + token },
+        });
+
+        if (res.ok) {
+          const data = await res.json().catch(() => ({}));
+          const msg = (data.message || '').toLowerCase();
+          if (data.confirmed && msg.includes('cooldown')) {
+            resultClass  = 'warn';
+            resultText   = 'Already triggered';
+            resultStatus = data.message;
+          } else if (data.confirmed) {
+            resultClass  = 'done';
+            resultText   = 'Opened';
+            resultStatus = 'ESP32 confirmed' + (data.message ? ': ' + data.message : '');
           } else {
-            throw new Error('HTTP ' + res.status);
+            resultClass  = 'warn';
+            resultText   = 'No reply';
+            resultStatus = 'Sent — no garage response';
           }
-        } catch (err) {
-          btn.textContent = 'Error';
-          btn.classList.replace('sending', 'error');
-          status.textContent = err.message;
-          return;
+        } else if (res.status === 401) {
+          resultClass  = 'error';
+          resultText   = 'Not Authorised';
+          resultStatus = 'Token rejected';
+        } else {
+          throw new Error('HTTP ' + res.status);
         }
+      } catch (err) {
+        resultClass  = 'error';
+        resultText   = 'Error';
+        resultStatus = err.message;
+      }
 
-        setTimeout(() => {
-          btn.classList.remove('sending', 'error', 'done', 'warn');
-          btn.textContent = 'Open Garage';
-          status.textContent = 'Ready';
-        }, 1500);
-      });
+      buttonState = 'result';
+      btn.classList.remove('sending');
+      btn.classList.add(resultClass);
+      btn.textContent = resultText;
+      status.textContent = resultStatus;
+
+      setTimeout(() => {
+        buttonState = null;
+        applyButtonState();
+      }, 1500);
     }
 
     async function fireTrigger(myGen) {
       if (gen !== myGen) return;
 
+      // In cooldown? Skip the fetch entirely — ESP32 would ignore it anyway. Render the cooldown UI directly.
+      if (cooldownRemainingMs() > 0) {
+        showButtonUI();
+        return;
+      }
+
       document.getElementById('stage').innerHTML = `
         <button id="btn" class="sending">Sending…</button>
         <div id="status"></div>`;
-
       const btn    = document.getElementById('btn');
       const status = document.getElementById('status');
+      buttonState = 'sending';
 
+      localStorage.setItem('garage_last_trigger_ms', String(Date.now()));
+
+      let resultClass = '', resultText = '', resultStatus = '';
       try {
         const res = await fetch('/.netlify/functions/trigger', {
           method: 'POST',
@@ -299,30 +391,44 @@
 
         if (res.ok) {
           const data = await res.json().catch(() => ({}));
-          if (data.confirmed) {
-            btn.textContent = 'Opened';
-            btn.classList.replace('sending', 'done');
-            status.textContent = 'Garage confirmed';
+          const msg = (data.message || '').toLowerCase();
+          if (data.confirmed && msg.includes('cooldown')) {
+            resultClass  = 'warn';
+            resultText   = 'Already triggered';
+            resultStatus = data.message;
+          } else if (data.confirmed) {
+            resultClass  = 'done';
+            resultText   = 'Opened';
+            resultStatus = 'Garage confirmed';
           } else {
-            btn.textContent = 'No reply';
-            btn.classList.replace('sending', 'warn');
-            status.textContent = 'Sent — no garage response';
+            resultClass  = 'warn';
+            resultText   = 'No reply';
+            resultStatus = 'Sent — no garage response';
           }
         } else if (res.status === 401) {
-          btn.textContent = 'Not Authorised';
-          btn.classList.replace('sending', 'error');
-          status.textContent = 'Token rejected';
+          resultClass  = 'error';
+          resultText   = 'Not Authorised';
+          resultStatus = 'Token rejected';
         } else {
           throw new Error('HTTP ' + res.status);
         }
       } catch (err) {
         if (gen !== myGen) return;
-        btn.textContent = 'Error';
-        btn.classList.replace('sending', 'error');
-        status.textContent = err.message;
+        resultClass  = 'error';
+        resultText   = 'Error';
+        resultStatus = err.message;
       }
 
-      setTimeout(() => { if (gen === myGen) showButtonUI(); }, 2000);
+      buttonState = 'result';
+      btn.classList.remove('sending');
+      btn.classList.add(resultClass);
+      btn.textContent = resultText;
+      status.textContent = resultStatus;
+
+      setTimeout(() => {
+        if (gen !== myGen) return;
+        showButtonUI();
+      }, 2000);
     }
   </script>
 </body>
