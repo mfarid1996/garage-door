@@ -31,7 +31,25 @@ const int SERVO_TRIGGER_POS = 10;   // angle held while the door opener button i
 const int SERVO_HOLD_MS     = 150;  // dwell at the trigger position
 const int SERVO_MOVE_MS     = 200;  // worst-case time for the servo to physically arrive
 
+// Servo-trigger cooldown — ignore repeat triggers within this window to prevent
+// double-actuation when the PWA auto-fires on visibilitychange or the user mashes.
+const unsigned long TRIGGER_COOLDOWN_MS = 10000;
+unsigned long lastTriggerMs = 0;
+bool hasTriggered = false;
+
 void onMessage(char* topic, byte* payload, unsigned int len) {
+  if (hasTriggered && millis() - lastTriggerMs < TRIGGER_COOLDOWN_MS) {
+    unsigned long remainingMs = TRIGGER_COOLDOWN_MS - (millis() - lastTriggerMs);
+    unsigned long remainingS  = (remainingMs + 999) / 1000;
+    char ackMsg[64];
+    snprintf(ackMsg, sizeof(ackMsg), "cooldown - ignored, %lus left", remainingS);
+    mqtt.publish("garage/ack", ackMsg);
+    Serial.printf("Trigger ignored — %lus cooldown remaining\n", remainingS);
+    return;
+  }
+  hasTriggered = true;
+  lastTriggerMs = millis();
+
   char ackMsg[64];
   snprintf(ackMsg, sizeof(ackMsg), "trigger received, uptime %lus", millis() / 1000);
   mqtt.publish("garage/ack", ackMsg);  // immediate ack on receive
