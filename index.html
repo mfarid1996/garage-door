@@ -17,6 +17,11 @@
       background: #111;
       font-family: -apple-system, BlinkMacSystemFont, sans-serif;
       color: #fff;
+    }
+    #stage {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
       gap: 28px;
     }
     #btn {
@@ -41,6 +46,10 @@
     #btn.error   { background: #e74c3c; box-shadow: 0 0 40px rgba(231,76,60,0.35); }
     #status { font-size: 0.85rem; color: #666; letter-spacing: 0.04em; text-transform: uppercase; }
     #conn {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
       font-size: 0.7rem;
       color: #666;
       letter-spacing: 0.04em;
@@ -48,7 +57,6 @@
       display: flex;
       align-items: center;
       gap: 8px;
-      margin-top: -16px;
     }
     #conn::before {
       content: '';
@@ -97,6 +105,8 @@
   </style>
 </head>
 <body>
+  <div id="stage"></div>
+  <div id="conn">Checking…</div>
   <script>
     const params = new URLSearchParams(location.search);
     const urlToken = params.get('t');
@@ -187,7 +197,7 @@
     }
 
     function showSetupScreen() {
-      document.body.innerHTML = `
+      document.getElementById('stage').innerHTML = `
         <div id="setup-wrap">
           <strong>Device not set up</strong>
           <p>Copy your setup link from the message Mark sent you, then paste it below.</p>
@@ -215,10 +225,9 @@
     }
 
     function showButtonUI() {
-      document.body.innerHTML = `
+      document.getElementById('stage').innerHTML = `
         <button id="btn">Open Garage</button>
-        <div id="status">Ready</div>
-        <div id="conn">Checking…</div>`;
+        <div id="status">Ready</div>`;
       applyConnUI();
 
       const btn    = document.getElementById('btn');
@@ -273,7 +282,7 @@
     async function fireTrigger(myGen) {
       if (gen !== myGen) return;
 
-      document.body.innerHTML = `
+      document.getElementById('stage').innerHTML = `
         <button id="btn" class="sending">Sending…</button>
         <div id="status"></div>`;
 
