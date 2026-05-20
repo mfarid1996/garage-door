@@ -109,20 +109,75 @@
       letter-spacing: 0.03em;
     }
     #setup-err { color: #e74c3c; font-size: 0.8rem; min-height: 1em; }
+    #greeting {
+      position: fixed;
+      top: 24px;
+      left: 0;
+      right: 0;
+      text-align: center;
+      font-size: 1.4rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      pointer-events: none;
+    }
+    #greeting .greeting-text {
+      background: linear-gradient(90deg, #ff5e8a, #ff2d6f, #ff8fa3, #ff5e8a);
+      background-size: 200% 100%;
+      -webkit-background-clip: text;
+              background-clip: text;
+      color: transparent;
+      animation: greeting-gradient 6s ease-in-out infinite;
+    }
+    #greeting .greeting-heart {
+      display: inline-block;
+      margin-left: 0.25em;
+      animation: greeting-pulse 1.5s ease-in-out infinite;
+    }
+    @keyframes greeting-gradient {
+      0%   { background-position:   0% 50%; }
+      50%  { background-position: 200% 50%; }
+      100% { background-position:   0% 50%; }
+    }
+    @keyframes greeting-pulse {
+      0%, 100% { transform: scale(1); }
+      50%      { transform: scale(1.18); }
+    }
   </style>
 </head>
 <body>
+  <div id="greeting" hidden></div>
   <div id="stage"></div>
   <div id="conn">Checking…</div>
   <script>
     const params = new URLSearchParams(location.search);
     const urlToken = params.get('t');
+    const urlUser  = params.get('u');
     if (urlToken) {
       localStorage.setItem('garage_token', urlToken);
+    }
+    if (urlUser) {
+      localStorage.setItem('garage_user', urlUser.toLowerCase());
+    }
+    if (urlToken || urlUser) {
       history.replaceState(null, '', location.pathname);
     }
 
     let token = localStorage.getItem('garage_token');
+
+    renderGreeting();
+
+    function renderGreeting() {
+      const el = document.getElementById('greeting');
+      if (!el) return;
+      const user = (localStorage.getItem('garage_user') || '').toLowerCase();
+      if (user === 'tarshley') {
+        el.innerHTML = '<span class="greeting-text">Hi Tarshley</span><span class="greeting-heart">❤️</span>';
+        el.hidden = false;
+      } else {
+        el.innerHTML = '';
+        el.hidden = true;
+      }
+    }
 
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/sw.js').catch(() => {});
@@ -277,11 +332,18 @@
       function tryToken(val) {
         val = val.trim();
         let tok = null;
-        try { tok = new URL(val).searchParams.get('t'); } catch {}
+        let user = null;
+        try {
+          const parsed = new URL(val);
+          tok  = parsed.searchParams.get('t');
+          user = parsed.searchParams.get('u');
+        } catch {}
         if (!tok && val.length > 8 && !val.includes(' ')) tok = val;
         if (!tok) { errEl.textContent = 'Invalid link — make sure you copied the whole URL.'; return; }
         localStorage.setItem('garage_token', tok);
+        if (user) localStorage.setItem('garage_user', user.toLowerCase());
         token = tok;
+        renderGreeting();
         initApp();
       }
 
