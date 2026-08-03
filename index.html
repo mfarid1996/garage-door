@@ -249,20 +249,10 @@
     function initApp() {
       startStatusFeed();
 
-      const standalone = window.matchMedia('(display-mode: standalone)').matches
-                      || window.navigator.standalone === true;
-
-      if (standalone) {
-        fireTrigger(++gen);
-        if (!visListenerAdded) {
-          visListenerAdded = true;
-          document.addEventListener('visibilitychange', () => {
-            if (document.visibilityState === 'visible') fireTrigger(++gen);
-          });
-        }
-      } else {
-        showButtonUI();
-      }
+      // Always show the manual button — the trigger only fires when the user
+      // taps it. (Previously, PWA standalone mode auto-fired on launch and on
+      // every visibilitychange, which opened the door just by opening the app.)
+      showButtonUI();
     }
 
     function applyConnUI() {
