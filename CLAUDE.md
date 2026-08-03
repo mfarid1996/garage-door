@@ -11,7 +11,9 @@ Garage-door opener triggered from a phone over MQTT. Four pieces, three of them 
 3. **`esp32/garageButton/garageButton.ino`** — ESP32 firmware. Subscribes to `garage/trigger`, publishes a status string to `garage/ack` on receipt, then drives a servo on GPIO13 to mechanically press the door-opener button. Status LED on GPIO2: fast blink during WiFi connect, slower blink during MQTT connect, solid HIGH when ready, 3-flicker pattern when a trigger fires. WiFi/MQTT creds live in `esp32/garageButton/secrets.h` (gitignored — copy from `secrets.h.example`). A 45 s hardware watchdog reboots the board if anything wedges; per-stage connect budgets (`WIFI_CONNECT_BUDGET_MS`, `MQTT_CONNECT_BUDGET_MS`) restart the board if WiFi or MQTT take too long rather than spinning in a half-broken state.
 4. **HiveMQ Cloud broker** (external, not in this repo) — relays between the function and the ESP32 on topics `garage/trigger` and `garage/ack`.
 
-Token revocation = remove the token string from `VALID_TOKENS` in Netlify env vars. There is no per-token identity or audit log; tokens are interchangeable shared secrets.
+Token revocation = remove the token string from `VALID_TOKENS` in Netlify env vars, then redeploy (env changes do not reach deployed functions until the next deploy). There is no per-token identity or audit log; tokens are interchangeable shared secrets.
+
+One entry in `VALID_TOKENS` is prefixed `guest-` — a single shared, permanent guest key handed to every visitor. It is an ordinary token in every respect; the prefix exists only so it can be found and rotated. Rotating it revokes all guests at once, which is the only revocation granularity guests have. See the "Guest access" section of `esp32-setup.md`.
 
 See **`esp32-setup.md`** for hardware specifics, board/library versions, `arduino-cli` build/flash commands, WiFi/MQTT config notes, and the gotchas list.
 

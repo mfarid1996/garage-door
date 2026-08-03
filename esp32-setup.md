@@ -10,6 +10,44 @@
 
 ---
 
+## Guest access
+
+There is one shared, permanent guest token in `VALID_TOKENS`, prefixed `guest-` so it is
+identifiable in the list. Hand the same link to every guest:
+
+```
+https://garage-door-mfarid.netlify.app/?t=guest-<...>
+```
+
+Guests do **not** install anything — the link opens in whatever browser they already have and
+shows the same button you get. The token is saved to `localStorage` and stripped from the address
+bar on first load, so reopening the link later still works.
+
+A guest token is functionally identical to a personal one: no expiry, no usage cap, no per-guest
+identity, and no audit trail. It is a permanent key. Anyone who keeps or forwards the link can open
+the door indefinitely.
+
+**To revoke all guest access at once** (the only revocation granularity — every guest shares this
+token, so rotating it cuts off all of them):
+
+```powershell
+# read current value, drop the guest- entry, append a fresh one, redeploy
+netlify env:list --json      # find the guest- entry
+netlify env:set VALID_TOKENS "<other,tokens>,guest-<new-random>" --force
+netlify deploy --prod
+```
+
+Generate the random part in PowerShell (note: the static `RandomNumberGenerator.GetBytes` does not
+exist in Windows PowerShell 5.1 — use `RNGCryptoServiceProvider`):
+
+```powershell
+$rng = New-Object System.Security.Cryptography.RNGCryptoServiceProvider
+$bytes = New-Object byte[] 18; $rng.GetBytes($bytes)
+"guest-" + [Convert]::ToBase64String($bytes).Replace('+','-').Replace('/','_').TrimEnd('=')
+```
+
+---
+
 ## Hardware
 
 - **Board:** ESP32-D0WD-V3 (revision v3.1), dual-core 240MHz
@@ -18,7 +56,7 @@
 - **Amazon listing:** https://www.amazon.com/dp/B0B18JQF16
 - **Servo:** SG90 (180° positional, not continuous rotation)
   - Black → GND, Red → VIN (5V), Yellow → GPIO13
-  - On trigger: rotates from 90° to 120° (+30°), waits 1s, returns to 90°
+  - On trigger: rotates from 45° (rest) to 10°, holds 150 ms, returns to 45° — see the `SERVO_*` constants in `garageButton.ino`
   - Library: ESP32Servo (install via `arduino-cli lib install "ESP32Servo"`)
 
 ---
