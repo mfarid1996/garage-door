@@ -1,10 +1,18 @@
-const mqtt = require('mqtt');
-const { getStore } = require('@netlify/blobs');
+import { connect } from 'mqtt';
+import { getStore } from '@netlify/blobs';
 
-// Scheduled every minute. The cron expression lives in netlify.toml
-// ([functions."poll-status"] schedule = "* * * * *") because this file is
-// CommonJS - Netlify only supports the inline `export const config = { schedule }`
-// form in ES modules, and the netlify.toml form works for every runtime.
+// Runtime API v2 (ESM, `export default`), NOT the v1 `exports.handler` form used by
+// trigger.js and wss-creds.js. That is deliberate: v1 lambda-compat functions do not
+// get the Netlify Blobs context injected, so getStore() throws
+// MissingBlobsEnvironmentError at runtime. v2 functions do. The two styles coexist
+// fine - Netlify records runtimeAPIVersion per function - so the garage-critical v1
+// functions were left alone.
+//
+// The .mjs extension is load-bearing: package.json has no "type":"module", so a .js
+// file here would be parsed as CommonJS and `export default` would be a syntax error.
+//
+// The schedule lives in the inline config below rather than in netlify.toml, which is
+// the v2 idiom.
 
 const STORE_NAME = 'garage-stats';
 const STATE_KEY = 'state';
@@ -12,7 +20,7 @@ const STATE_KEY = 'state';
 const CONNECT_TIMEOUT_MS = 6000;
 const COLLECT_MS = 3000;         // window to receive the retained messages
 const HARD_TIMEOUT_MS = 15000;   // absolute cap (scheduled functions get 30s)
-const POLL_INTERVAL_MS = 60000;  // must match the cron in netlify.toml
+const POLL_INTERVAL_MS = 60000;  // must match the schedule below
 const MISSED_POLL_MS = 3 * POLL_INTERVAL_MS;
 const RETENTION_MS = 8 * 24 * 60 * 60 * 1000;
 const MAX_EVENTS = 5000;         // hard cap so a flapping device can't grow the blob without bound
@@ -70,7 +78,7 @@ const collectRetained = () => new Promise((resolve) => {
   hardTimer = setTimeout(() => finish('Hard timeout'), HARD_TIMEOUT_MS);
 
   try {
-    client = mqtt.connect(`mqtts://${process.env.MQTT_HOST}`, {
+    client = connect(`mqtts://${process.env.MQTT_HOST}`, {
       port: 8883,
       username: process.env.MQTT_USER,
       password: process.env.MQTT_PASS,
@@ -139,16 +147,15 @@ const push = (list, ev) => {
   return true;
 };
 
-exports.handler = async () => {
+export default async () => {
   const now = Date.now();
-  const ok = (body) => ({
-    statusCode: 200,
+  const ok = (body) => new Response(JSON.stringify(body), {
+    status: 200,
     headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
-    body: JSON.stringify(body),
   });
 
   try {
-    // siteID/token are injected automatically inside Netlify Functions.
+    // siteID/token are injected automatically inside v2 Functions.
     // Strong consistency because eventual reads can lag up to ~60s - exactly our
     // poll interval - which would make us re-read our own stale snapshot.
     const store = getStore({ name: STORE_NAME, consistency: 'strong' });
@@ -288,4 +295,8 @@ exports.handler = async () => {
     console.error('poll-status failed:', err && err.message);
     return ok({ ok: false, error: err && err.message ? err.message : 'unknown error' });
   }
+};
+
+export const config = {
+  schedule: '* * * * *',
 };

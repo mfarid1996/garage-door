@@ -425,8 +425,18 @@
       const events  = (statsData.events || []).slice().sort((a, b) => a.t - b.t);
       const current = statsData.current || {};
 
-      // Nothing observed yet (fresh deploy, or the store read failed) — the backend
-      // still sends since:now, so an empty log alone doesn't mean 100% uptime.
+      // The backend couldn't read its store at all. Say so rather than rendering
+      // this as "no data yet" — that ambiguity once hid a total backend failure
+      // (Blobs env not configured) behind an innocuous-looking placeholder.
+      if (statsData.ready === false) {
+        console.warn('[garage] stats unavailable:', statsData.error || 'unknown');
+        el.innerHTML = '<div>Stats unavailable</div>';
+        el.hidden = false;
+        return;
+      }
+
+      // Nothing observed yet (fresh deploy) — the backend still sends since:now,
+      // so an empty log alone doesn't mean 100% uptime.
       if (!events.length && current.state !== 'online' && current.state !== 'offline') {
         el.innerHTML = '<div>No connectivity data yet</div>';
         el.hidden = false;
