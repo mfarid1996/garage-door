@@ -2,6 +2,7 @@
   "name": "garage-door",
   "version": "1.0.0",
   "dependencies": {
+    "@netlify/blobs": "^10.7.13",
     "mqtt": "^5.10.1"
   }
 }

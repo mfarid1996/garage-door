@@ -75,9 +75,16 @@ $bytes = New-Object byte[] 18; $rng.GetBytes($bytes)
 First, copy `esp32/garageButton/secrets.h.example` to `esp32/garageButton/secrets.h` and fill in your WiFi and MQTT credentials.
 
 ```powershell
+arduino-cli board list    # find the port — see the warning below
 arduino-cli compile --fqbn esp32:esp32:esp32 "<path-to-repo>\esp32\garageButton"
-arduino-cli upload --fqbn esp32:esp32:esp32 --port COM5 "<path-to-repo>\esp32\garageButton"
+arduino-cli upload --fqbn esp32:esp32:esp32 --port COM3 "<path-to-repo>\esp32\garageButton"
 ```
+
+**The COM port moves.** Windows assigns it per physical USB socket, so plugging the board into a
+different port changes the number (it has been COM5 and COM3 at different times). Always run
+`arduino-cli board list` first and use the port on the `USB-SERIAL CH340` row.
+
+`compile` needs no board attached — only `upload` does.
 
 ### Netlify redeploy (after any change to web app or env vars)
 
@@ -99,10 +106,27 @@ netlify deploy --prod
 ## MQTT (HiveMQ Cloud)
 
 - **Broker:** HiveMQ Cloud (free tier)
-- **Port:** 8883 (MQTT over TLS)
-- **Topic:** `garage/trigger`
+- **Port:** 8883 (MQTT over TLS), 8884 (WSS, used by the browser status feed)
+- **Topics:**
+  | Topic | Retained | Published by | Purpose |
+  |---|---|---|---|
+  | `garage/trigger` | no | Netlify Function | `1` = press the button |
+  | `garage/ack` | no | ESP32 | trigger received / cooldown-ignored |
+  | `garage/status` | **yes** | ESP32 (+ LWT) | `online` / `offline` |
+  | `garage/session` | **yes** | ESP32 | `{session, boots, downMs, reason}` on every MQTT connect |
 - Credentials go in `secrets.h` (ESP32) and Netlify env vars (`MQTT_HOST`, `MQTT_USER`, `MQTT_PASS`)
 - If you rotate the MQTT password, update both Netlify env vars and re-flash the ESP32
+
+### Session / boot counters (NVS)
+
+The firmware keeps two monotonic counters in NVS namespace `garage`: `boots` (bumped once per
+`setup()`) and `session` (bumped on every successful MQTT connect). They are written **only** on
+those two events — never periodically — because a heartbeat write would burn the flash sector for
+no extra information. A full flash erase resets them to 0; the backend resyncs after one poll and
+loses at most one recorded reconnect.
+
+Note that **flashing the board is itself a disconnect**, so every upload registers as one
+connectivity-loss event in the statistics.
 
 ---
 

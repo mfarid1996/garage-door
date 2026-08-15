@@ -40,6 +40,8 @@
       -webkit-tap-highlight-color: transparent;
     }
     #btn:active  { transform: scale(0.93); }
+    /* Declared before the transient state classes so those always win if both land. */
+    #btn.unverified { background: #57d894; box-shadow: 0 0 40px rgba(87,216,148,0.30); }
     #btn.sending { background: #e67e22; box-shadow: 0 0 40px rgba(230,126,34,0.45); cursor: default; }
     #btn.done    { background: #2ecc71; box-shadow: 0 0 40px rgba(46,204,113,0.35); cursor: default; }
     #btn.warn    { background: #f1c40f; box-shadow: 0 0 40px rgba(241,196,15,0.40); cursor: default; }
@@ -52,6 +54,15 @@
     }
     #btn:disabled { cursor: not-allowed; }
     #status { font-size: 0.85rem; color: #666; letter-spacing: 0.04em; text-transform: uppercase; }
+    #stats {
+      font-size: 0.75rem;
+      color: #666;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      line-height: 1.7;
+      text-align: center;
+    }
+    #stats .win { color: #888; }
     #conn {
       position: fixed;
       bottom: 24px;
@@ -183,14 +194,20 @@
       navigator.serviceWorker.register('/sw.js').catch(() => {});
     }
 
-    let gen = 0;
-    let visListenerAdded = false;
     let connState = 'unknown';   // 'unknown' | 'online' | 'offline'
     let statusFeedStarted = false;
 
-    const COOLDOWN_MS = 10000;
+    const COOLDOWN_MS      = 10000;
+    const STATS_REFRESH_MS = 60000;
+    const DAY_MS           = 86400000;
     let buttonState = null;            // 'idle' | 'idle-offline' | 'sending' | 'result' | 'cooldown'
     let cooldownTimer = null;
+
+    // Declared up here, not next to the stats functions below: initApp() runs
+    // mid-file and reaches renderStats(), which would hit the TDZ otherwise.
+    let statsData   = null;
+    let statsSkewMs = 0;               // server clock minus browser clock — phones drift
+    let statsTimer  = null;
 
     function cooldownRemainingMs() {
       const last = parseInt(localStorage.getItem('garage_last_trigger_ms') || '0', 10);
@@ -207,7 +224,7 @@
       if (!btn || !status) return;  // setup screen is showing — nothing to gate
 
       if (cooldownTimer) { clearInterval(cooldownTimer); cooldownTimer = null; }
-      btn.classList.remove('sending', 'done', 'warn', 'error', 'cooldown');
+      btn.classList.remove('sending', 'done', 'warn', 'error', 'cooldown', 'unverified');
 
       const remaining = cooldownRemainingMs();
       if (remaining > 0) {
@@ -230,17 +247,26 @@
         return;
       }
 
-      if (connState === 'online') {
-        buttonState = 'idle';
-        btn.disabled = false;
-        btn.textContent = 'Open Garage';
-        status.textContent = 'Ready';
-      } else {
+      if (connState === 'offline') {
+        // A *confirmed* offline is real information, so respect it and block the tap.
         buttonState = 'idle-offline';
         btn.classList.add('cooldown');  // reuse greyed style
         btn.disabled = true;
         btn.textContent = 'Garage offline';
         status.textContent = '';
+        return;
+      }
+
+      buttonState = 'idle';
+      btn.disabled = false;
+      btn.textContent = 'Open Garage';
+      if (connState === 'online') {
+        status.textContent = 'Ready';
+      } else {
+        // 'unknown' only means the status feed hasn't spoken — that is not evidence
+        // the garage is down, so let the tap through and just flag the uncertainty.
+        btn.classList.add('unverified');
+        status.textContent = 'Ready (unverified)';
       }
     }
 
@@ -253,6 +279,8 @@
       // taps it. (Previously, PWA standalone mode auto-fired on launch and on
       // every visibilitychange, which opened the door just by opening the app.)
       showButtonUI();
+
+      startStats();
     }
 
     function applyConnUI() {
@@ -306,6 +334,114 @@
       client.on('error', () => {});  // mqtt.js will keep retrying
     }
 
+    // --- ESP32 connectivity stats -------------------------------------------
+    // /stats returns the raw event log; the 24h / 7d windows are cut here so the
+    // windows can change later without re-flashing the ESP32 or redeploying.
+    function startStats() {
+      // Guests get a working button and nothing else.
+      if (statsTimer || !token || token.startsWith('guest-')) return;
+      fetchStats();
+      statsTimer = setInterval(fetchStats, STATS_REFRESH_MS);
+    }
+
+    function fetchStats() {
+      fetch('/.netlify/functions/stats', {
+        headers: { 'Authorization': 'Bearer ' + token },
+      })
+        .then(r => r.ok ? r.json() : Promise.reject(new Error('stats ' + r.status)))
+        .then(data => {
+          statsData = data;
+          // Anchor to the server's clock, then keep counting on the browser's, so an
+          // ongoing outage still grows between the 60 s refreshes.
+          if (typeof data.now === 'number') statsSkewMs = data.now - Date.now();
+          renderStats();
+        })
+        .catch(() => {});  // /stats may not exist yet — render nothing, the button still works
+    }
+
+    // Rebuild outage intervals from the event log. Events are objects of the shape
+    // {t, type:'down'|'up', downMs, src, session}.
+    function outageIntervals(events, current, now) {
+      const out = [];
+      let openAt = null;
+
+      for (const ev of events) {
+        if (ev.type === 'down') {
+          // A second 'down' with no 'up' between them means the first outage never
+          // visibly ended — keep the earlier start instead of inventing an end.
+          if (openAt === null) openAt = ev.t;
+        } else if (ev.type === 'up') {
+          // The device's own downMs is exact; differencing timestamps is only as good
+          // as the poller's interval. null / -1 means the device couldn't know.
+          const exact = typeof ev.downMs === 'number' && ev.downMs >= 0 ? ev.downMs : null;
+          const start = exact !== null ? ev.t - exact : openAt;
+          if (start !== null) out.push({ start, end: ev.t });
+          openAt = null;
+        }
+      }
+
+      if (openAt !== null) {
+        if (current.state !== 'online') out.push({ start: openAt, end: now });  // still down — count up to now
+      } else if (current.state === 'offline' && current.since) {
+        out.push({ start: current.since, end: now });  // down, but its 'down' event was pruned
+      }
+      return out;
+    }
+
+    function fmtDur(ms) {
+      const s = Math.max(0, Math.round(ms / 1000));
+      if (s < 60) return s + 's';
+      const m = Math.floor(s / 60);
+      if (m < 60) return m + 'm ' + (s % 60) + 's';
+      const h = Math.floor(m / 60);
+      if (h < 24) return h + 'h ' + String(m % 60).padStart(2, '0') + 'm';
+      return Math.floor(h / 24) + 'd ' + String(h % 24).padStart(2, '0') + 'h';
+    }
+
+    function statsRow(label, windowMs, events, outages, now, since) {
+      const from  = now - windowMs;
+      const drops = events.filter(e => e.type === 'down' && e.t >= from && e.t <= now).length;
+
+      let downMs = 0;
+      for (const o of outages) {
+        // Clip to the window — an outage straddling the edge only counts inside it.
+        const a = Math.max(o.start, from);
+        const b = Math.min(o.end, now);
+        if (b > a) downMs += b - a;
+      }
+
+      // Say so when the log is younger than the window, so "0 drops" over 7d isn't
+      // misread as a full week of perfect uptime.
+      const covered = since > from ? ' (' + fmtDur(now - since) + ' of data)' : '';
+      return '<div><span class="win">' + label + '</span> ' + drops +
+             (drops === 1 ? ' drop · ' : ' drops · ') + fmtDur(downMs) + ' down' + covered + '</div>';
+    }
+
+    function renderStats() {
+      const el = document.getElementById('stats');
+      if (!el || !statsData) return;
+
+      const now     = Date.now() + statsSkewMs;
+      const events  = (statsData.events || []).slice().sort((a, b) => a.t - b.t);
+      const current = statsData.current || {};
+
+      // Nothing observed yet (fresh deploy, or the store read failed) — the backend
+      // still sends since:now, so an empty log alone doesn't mean 100% uptime.
+      if (!events.length && current.state !== 'online' && current.state !== 'offline') {
+        el.innerHTML = '<div>No connectivity data yet</div>';
+        el.hidden = false;
+        return;
+      }
+
+      const outages = outageIntervals(events, current, now);
+      const since   = typeof statsData.since === 'number' ? statsData.since
+                    : (events.length ? events[0].t : now);
+
+      el.innerHTML = statsRow('24h', DAY_MS, events, outages, now, since) +
+                     statsRow('7d', 7 * DAY_MS, events, outages, now, since);
+      el.hidden = false;
+    }
+
     function showSetupScreen() {
       document.getElementById('stage').innerHTML = `
         <div id="setup-wrap">
@@ -344,11 +480,13 @@
     function showButtonUI() {
       document.getElementById('stage').innerHTML = `
         <button id="btn">Open Garage</button>
-        <div id="status">Ready</div>`;
+        <div id="status">Ready</div>
+        <div id="stats" hidden></div>`;
 
       const btn = document.getElementById('btn');
       btn.addEventListener('click', onButtonClick);
       applyButtonState();
+      renderStats();  // the stage was just re-rendered — repaint whatever we already fetched
     }
 
     async function onButtonClick() {
@@ -358,7 +496,7 @@
       const status = document.getElementById('status');
 
       buttonState = 'sending';
-      btn.classList.remove('done', 'warn', 'error', 'cooldown');
+      btn.classList.remove('done', 'warn', 'error', 'cooldown', 'unverified');
       btn.classList.add('sending');
       btn.disabled = true;
       btn.textContent = 'Sending…';
@@ -412,75 +550,6 @@
         buttonState = null;
         applyButtonState();
       }, 1500);
-    }
-
-    async function fireTrigger(myGen) {
-      if (gen !== myGen) return;
-
-      // In cooldown? Skip the fetch entirely — ESP32 would ignore it anyway. Render the cooldown UI directly.
-      if (cooldownRemainingMs() > 0) {
-        showButtonUI();
-        return;
-      }
-
-      document.getElementById('stage').innerHTML = `
-        <button id="btn" class="sending">Sending…</button>
-        <div id="status"></div>`;
-      const btn    = document.getElementById('btn');
-      const status = document.getElementById('status');
-      buttonState = 'sending';
-
-      localStorage.setItem('garage_last_trigger_ms', String(Date.now()));
-
-      let resultClass = '', resultText = '', resultStatus = '';
-      try {
-        const res = await fetch('/.netlify/functions/trigger', {
-          method: 'POST',
-          headers: { 'Authorization': 'Bearer ' + token },
-        });
-
-        if (gen !== myGen) return;
-
-        if (res.ok) {
-          const data = await res.json().catch(() => ({}));
-          const msg = (data.message || '').toLowerCase();
-          if (data.confirmed && msg.includes('cooldown')) {
-            resultClass  = 'warn';
-            resultText   = 'Already triggered';
-            resultStatus = data.message;
-          } else if (data.confirmed) {
-            resultClass  = 'done';
-            resultText   = 'Opened';
-            resultStatus = 'Garage confirmed';
-          } else {
-            resultClass  = 'warn';
-            resultText   = 'No reply';
-            resultStatus = 'Sent — no garage response';
-          }
-        } else if (res.status === 401) {
-          resultClass  = 'error';
-          resultText   = 'Not Authorised';
-          resultStatus = 'Token rejected';
-        } else {
-          throw new Error('HTTP ' + res.status);
-        }
-      } catch (err) {
-        if (gen !== myGen) return;
-        resultClass  = 'error';
-        resultText   = 'Error';
-        resultStatus = err.message;
-      }
-
-      buttonState = 'result';
-      btn.classList.remove('sending');
-      btn.classList.add(resultClass);
-      btn.textContent = resultText;
-      status.textContent = resultStatus;
-
-      setTimeout(() => {
-        if (gen !== myGen) return;
-        showButtonUI();
-      }, 2000);
     }
   </script>
 </body>

@@ -3,6 +3,7 @@
 #include <PubSubClient.h>
 #include <ESP32Servo.h>
 #include <esp_task_wdt.h>
+#include <Preferences.h>
 #include "secrets.h"
 
 // ── Hardware ──────────────────────────────────────────────────────────────────
@@ -36,6 +37,62 @@ const int SERVO_MOVE_MS     = 200;  // worst-case time for the servo to physical
 const unsigned long TRIGGER_COOLDOWN_MS = 10000;
 unsigned long lastTriggerMs = 0;
 bool hasTriggered = false;
+
+// ── Session / downtime reporting ──────────────────────────────────────────────
+// Two NVS-persisted counters survive reboots and power cuts, so the dashboard can
+// tell "the broker dropped us" apart from "the board rebooted". They are written
+// ONLY on the two discrete events below (a few writes a day) — never on a timer.
+// A periodic write would burn the NVS flash sector for no extra information.
+Preferences prefs;
+const char* NVS_NAMESPACE   = "garage";
+const char* NVS_KEY_BOOTS   = "boots";    // bumped once per setup()
+const char* NVS_KEY_SESSION = "session";  // bumped on every successful MQTT connect
+
+uint32_t bootCount    = 0;
+uint32_t sessionCount = 0;
+
+// millis() keeps running through a WiFi/MQTT drop as long as the board does not
+// reboot, so the outage can be measured exactly by timestamping the moment the
+// loss is observed. After a boot millis() has reset and the device genuinely
+// cannot know how long it was dead — that case reports -1 instead of guessing.
+const long DOWN_MS_UNKNOWN = -1;
+
+bool          gapOpen      = false;  // an outage is in progress, awaiting its report
+unsigned long gapStartMs   = 0;      // millis() when the loss was first observed
+bool          gapLostWiFi  = false;  // the radio dropped too, not just the MQTT session
+bool          firstConnect = true;   // the connect that follows setup() is a "boot"
+
+// Read-increment-write in one short open/close so a brownout mid-update cannot
+// leave the namespace held open.
+uint32_t bumpCounter(const char* key) {
+  prefs.begin(NVS_NAMESPACE, false);
+  uint32_t value = prefs.getUInt(key, 0) + 1;
+  prefs.putUInt(key, value);
+  prefs.end();
+  return value;
+}
+
+// Called from both the WiFi and the MQTT watchpoints. The first observation wins:
+// the radio usually drops before PubSubClient notices, and that earlier timestamp
+// is the true start of the outage.
+void noteDisconnect(bool wifiLost) {
+  if (!gapOpen) {
+    gapOpen    = true;
+    gapStartMs = millis();
+  }
+  if (wifiLost) gapLostWiFi = true;
+}
+
+// Retained so a browser that loads mid-session still sees the last reconnect.
+// Hand-rolled with snprintf rather than pulling in ArduinoJson for four fields.
+void publishSession(const char* reason, long downMs) {
+  char json[96];
+  snprintf(json, sizeof(json),
+           "{\"session\":%lu,\"boots\":%lu,\"downMs\":%ld,\"reason\":\"%s\"}",
+           (unsigned long)sessionCount, (unsigned long)bootCount, downMs, reason);
+  mqtt.publish("garage/session", json, true);
+  Serial.printf("Session published: %s\n", json);
+}
 
 void onMessage(char* topic, byte* payload, unsigned int len) {
   if (hasTriggered && millis() - lastTriggerMs < TRIGGER_COOLDOWN_MS) {
@@ -130,6 +187,15 @@ void connectMQTT() {
                        false)) {
         Serial.println(" connected");
         mqtt.publish("garage/status", "online", true);  // overwrite the will while we're up
+
+        sessionCount = bumpCounter(NVS_KEY_SESSION);
+        const char* reason = firstConnect ? "boot" : (gapLostWiFi ? "wifi" : "mqtt");
+        long downMs = firstConnect ? DOWN_MS_UNKNOWN : (long)(millis() - gapStartMs);
+        publishSession(reason, downMs);
+        firstConnect = false;
+        gapOpen      = false;
+        gapLostWiFi  = false;
+
         mqtt.subscribe(MQTT_TOPIC);
         return;
       }
@@ -138,6 +204,10 @@ void connectMQTT() {
       backoff *= 2;
       if (backoff > 5000) backoff = 5000;
     }
+
+    // Polled every pass, not just per attempt: the radio can drop mid-backoff, and
+    // that is what makes this outage a "wifi" one rather than a broker-side "mqtt" one.
+    if (WiFi.status() != WL_CONNECTED) noteDisconnect(true);
 
     unsigned long now = millis();
     if (now - lastBlink >= LED_BLINK_MQTT_MS) {
@@ -158,6 +228,11 @@ void setup() {
 
   servo.attach(SERVO_PIN);
   servo.write(SERVO_REST_POS);
+
+  // One NVS write per power-on / reset. Done before the network stages so the boot
+  // is still counted if WiFi or MQTT blows its budget and forces a restart.
+  bootCount = bumpCounter(NVS_KEY_BOOTS);
+  Serial.printf("\nBoot #%lu\n", (unsigned long)bootCount);
 
   // Reconfigure the auto-initialised watchdog with our timeout and add the loop task.
   esp_task_wdt_config_t wdt_config = {
@@ -180,7 +255,12 @@ void setup() {
 }
 
 void loop() {
+  // Watched separately from MQTT because the radio normally drops first; catching it
+  // here timestamps the real start of the outage instead of PubSubClient's later notice.
+  if (WiFi.status() != WL_CONNECTED) noteDisconnect(true);
+
   if (!mqtt.connected()) {
+    noteDisconnect(false);
     digitalWrite(LED_PIN, LOW);
     connectMQTT();
     digitalWrite(LED_PIN, HIGH);

@@ -2,6 +2,12 @@
   publish = "."
   functions = "netlify/functions"
 
+# Scheduled function: poll garage/status + garage/session every minute.
+# Declared here (rather than inline) because poll-status.js is CommonJS -
+# Netlify's inline `export const config = { schedule }` form requires ESM.
+[functions."poll-status"]
+  schedule = "* * * * *"
+
 [[headers]]
   for = "/sw.js"
   [headers.values]
