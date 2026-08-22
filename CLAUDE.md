@@ -47,7 +47,11 @@ This bit us once already: both stats functions shipped as v1 `.js`, `getStore()`
 
 ### Reboot attribution (`rst`)
 
-The device reports `rst` (from `esp_reset_reason()`) in the `garage/session` payload, so a reboot can be attributed rather than guessed — `brownout`/`pwrglitch` point at the power rail (the servo shares `VBUS` with no bulk capacitor), `sw` is the firmware's own restart after a connect-budget overrun, `panic`/`taskwdt` is the watchdog, `usb` is a re-flash, `poweron` is a real power cut. The PWA renders a third stats line: `7d · 3 reboots · 2 flash · 1 brownout`, with power-related causes in amber.
+The device reports `rst` (from `esp_reset_reason()`) in the `garage/session` payload, so a reboot can be attributed rather than guessed — `brownout`/`pwrglitch` point at the power rail (the servo shares `VBUS` with no bulk capacitor), `budget` is the firmware's own restart after a connect-budget overrun, `panic`/`taskwdt` is the watchdog, `poweron` is a real power cut. The PWA renders a third stats line: `7d · 3 reboots · 1 brownout · 2 unattributed`, with power-related causes in amber.
+
+**Bench-only causes are excluded from the count.** `usb`, `hostreset` and `jtag` require a computer attached to the board; in service it hangs off a plain USB power supply with no host that could reset it. They are marked `dev: true` in `RST_INFO` and dropped in `rebootRow`, so a development session does not permanently inflate the reliability record. Only *one* reboot is dropped per event — the newest, the only one whose cause is knowable — so a burst of three ending in a re-flash still reports the other two as unattributed rather than discarding all three.
+
+The row **always renders, including at zero**, with the same `(Xm of data)` coverage note `statsRow` uses. A row that vanishes at zero reads as a broken feature, and `0 reboots` over a ten-minute-old log must not look like a stable week.
 
 **`esp_reset_reason()` is latched at boot and republished unchanged on every later reconnect.** So `rst` describes the *current* event only when `reason === 'boot'`. `makeUpMeta()` in `poll-status.mjs` enforces that gate — without it, one old brownout would be re-reported as a fresh brownout on every WiFi blip for as long as the board stayed up. It is attached only to the `'up'` event, so counting events that carry an `rst` counts reboots exactly once.
 

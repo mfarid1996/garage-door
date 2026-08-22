@@ -371,15 +371,19 @@
       brownout:  { label: 'brownout',    power: true },
       pwrglitch: { label: 'power glitch', power: true },
       budget:    { label: 'connect timeout' }, // firmware restarted itself
-      hostreset: { label: 'flash' },           // 1200bps touch from a dev machine
       sw:        { label: 'self-restart' },    // older firmware: could be either
       panic:     { label: 'crash' },
       lockup:    { label: 'lockup' },
       taskwdt:   { label: 'watchdog' },
       intwdt:    { label: 'watchdog' },
       wdt:       { label: 'watchdog' },
-      usb:       { label: 'usb reset' },       // USB peripheral reset the chip
-      jtag:      { label: 'jtag' },
+      // `dev: true` = can only happen with a computer attached. In service the board
+      // hangs off a plain USB power supply with no host to reset it, so these are
+      // bench artefacts. They are excluded from the count entirely (see rebootRow),
+      // otherwise every re-flash would show up as garage downtime forever.
+      usb:       { label: 'usb reset', dev: true },  // esptool / host reset
+      hostreset: { label: 'flash',     dev: true },  // 1200bps touch re-flash
+      jtag:      { label: 'jtag',      dev: true },  // debugger
       sdio:      { label: 'sdio' },
       ext:       { label: 'reset pin' },
       deepsleep: { label: 'deep sleep' },
@@ -405,7 +409,7 @@
     //
     // Renders nothing when there are none, including the whole pre-Nano-ESP32
     // history, which has neither field.
-    function rebootRow(label, windowMs, events, now) {
+    function rebootRow(label, windowMs, events, now, since) {
       const from = now - windowMs;
       const counts = new Map();
       let total = 0;
@@ -413,15 +417,35 @@
 
       for (const ev of events) {
         if (ev.t < from || ev.t > now) continue;
-        const n = Number.isFinite(ev.reboots) && ev.reboots > 0 ? ev.reboots : (ev.rst ? 1 : 0);
+        let n = Number.isFinite(ev.reboots) && ev.reboots > 0 ? ev.reboots : (ev.rst ? 1 : 0);
         if (!n) continue;
+
+        // A bench-only cause accounts for exactly ONE of this event's reboots — the
+        // most recent one, the only one whose cause is knowable. Drop just that one
+        // and let any others in the same burst stay counted but unattributed, rather
+        // than discarding a whole burst because a re-flash happened to end it.
+        const info = Object.prototype.hasOwnProperty.call(RST_INFO, ev.rst) ? RST_INFO[ev.rst] : null;
+        if (info && info.dev) {
+          n -= 1;
+          if (n > 0) total += n;
+          continue;
+        }
+
         total += n;
         if (ev.rst) {
           counts.set(ev.rst, (counts.get(ev.rst) || 0) + 1);
           attributed += 1;
         }
       }
-      if (!total) return '';
+
+      // Always render, even at zero. A row that silently disappears reads as a broken
+      // feature, and it is inconsistent with statsRow, which shows "0 drops". The
+      // coverage note is what keeps zero honest: "0 reboots" over a log that is ten
+      // minutes old must not look like a stable week.
+      const covered = since > from ? ' (' + fmtDur(now - since) + ' of data)' : '';
+      if (!total) {
+        return '<div><span class="win">' + label + '</span> 0 reboots' + covered + '</div>';
+      }
 
       const parts = [...counts.entries()]
         .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
@@ -435,7 +459,8 @@
       if (total > attributed) parts.push((total - attributed) + ' unattributed');
 
       return '<div><span class="win">' + label + '</span> ' + total +
-             (total === 1 ? ' reboot · ' : ' reboots · ') + parts.join(' · ') + '</div>';
+             (total === 1 ? ' reboot · ' : ' reboots · ') + parts.join(' · ') +
+             covered + '</div>';
     }
 
     // Rebuild outage intervals from the event log. Events are objects of the shape
@@ -529,7 +554,7 @@
 
       el.innerHTML = statsRow('24h', DAY_MS, events, outages, now, since) +
                      statsRow('7d', 7 * DAY_MS, events, outages, now, since) +
-                     rebootRow('7d', 7 * DAY_MS, events, now);
+                     rebootRow('7d', 7 * DAY_MS, events, now, since);
       el.hidden = false;
     }
 
