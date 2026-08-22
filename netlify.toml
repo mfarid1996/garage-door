@@ -10,3 +10,49 @@
   for = "/sw.js"
   [headers.values]
     Cache-Control = "no-cache"
+
+# `publish = "."` serves the repository root, so every tracked file is reachable by
+# URL — firmware source, function source, and the docs were all returning 200.
+# Nothing secret is committed (secrets.h and deno.lock are gitignored and correctly
+# 404), but the WiFi PSK and MQTT credentials in secrets.h would be enough to publish
+# garage/trigger directly and open the door with no token at all. One .gitignore line
+# should not be the only thing standing between that file and the internet, so serve
+# only what the app actually needs.
+#
+# These block the SOURCE directory `/netlify/*`. Deployed functions live at
+# `/.netlify/functions/*` (leading dot) and are unaffected — verified on a draft
+# deploy before this shipped.
+[[redirects]]
+  from = "/esp32/*"
+  to = "/index.html"
+  status = 404
+
+[[redirects]]
+  from = "/netlify/*"
+  to = "/index.html"
+  status = 404
+
+[[redirects]]
+  from = "/docs/*"
+  to = "/index.html"
+  status = 404
+
+[[redirects]]
+  from = "/CLAUDE.md"
+  to = "/index.html"
+  status = 404
+
+[[redirects]]
+  from = "/esp32-setup.md"
+  to = "/index.html"
+  status = 404
+
+[[redirects]]
+  from = "/package.json"
+  to = "/index.html"
+  status = 404
+
+[[redirects]]
+  from = "/package-lock.json"
+  to = "/index.html"
+  status = 404

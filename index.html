@@ -63,6 +63,8 @@
       text-align: center;
     }
     #stats .win { color: #888; }
+    /* Power-related reset causes — the ones that point at the supply, not software. */
+    #stats .bad { color: #d08a2c; }
     #conn {
       position: fixed;
       bottom: 24px;
@@ -359,8 +361,86 @@
         .catch(() => {});  // /stats may not exist yet — render nothing, the button still works
     }
 
+    // Reset causes reported by the device, mapped to something readable. Anything
+    // not listed (including events from older firmware, which carry no `rst` at all)
+    // is simply not counted. `power` marks the causes that point at the supply
+    // rather than at software — the servo shares VBUS with no bulk capacitor, so
+    // these are the ones worth noticing.
+    const RST_INFO = {
+      poweron:   { label: 'power-on' },
+      brownout:  { label: 'brownout',    power: true },
+      pwrglitch: { label: 'power glitch', power: true },
+      budget:    { label: 'connect timeout' }, // firmware restarted itself
+      hostreset: { label: 'flash' },           // 1200bps touch from a dev machine
+      sw:        { label: 'self-restart' },    // older firmware: could be either
+      panic:     { label: 'crash' },
+      lockup:    { label: 'lockup' },
+      taskwdt:   { label: 'watchdog' },
+      intwdt:    { label: 'watchdog' },
+      wdt:       { label: 'watchdog' },
+      usb:       { label: 'usb reset' },       // USB peripheral reset the chip
+      jtag:      { label: 'jtag' },
+      sdio:      { label: 'sdio' },
+      ext:       { label: 'reset pin' },
+      deepsleep: { label: 'deep sleep' },
+      efuse:     { label: 'efuse' },
+      unknown:   { label: 'unknown' },
+    };
+
+    // These strings originate at the MQTT broker, so treat them as hostile even
+    // though the poller already whitelists `rst` — this row is built with innerHTML
+    // and the page has no CSP, so an unescaped value here would be a stored XSS that
+    // hands the permanent door token to whoever published it.
+    const esc = (s) => String(s).replace(/[&<>"']/g, (c) => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+    // One line summarising why the board rebooted inside the window.
+    //
+    // The total comes from `reboots` (the device's own NVS counter, differenced by
+    // the poller), NOT from counting `rst` values — only the most recent reboot in a
+    // burst has a knowable cause, because the device republishes one retained
+    // session payload rather than one per reset. Any excess is shown as
+    // "unattributed" instead of being silently dropped. Events written before
+    // `reboots` existed carry only `rst`, which means exactly one.
+    //
+    // Renders nothing when there are none, including the whole pre-Nano-ESP32
+    // history, which has neither field.
+    function rebootRow(label, windowMs, events, now) {
+      const from = now - windowMs;
+      const counts = new Map();
+      let total = 0;
+      let attributed = 0;
+
+      for (const ev of events) {
+        if (ev.t < from || ev.t > now) continue;
+        const n = Number.isFinite(ev.reboots) && ev.reboots > 0 ? ev.reboots : (ev.rst ? 1 : 0);
+        if (!n) continue;
+        total += n;
+        if (ev.rst) {
+          counts.set(ev.rst, (counts.get(ev.rst) || 0) + 1);
+          attributed += 1;
+        }
+      }
+      if (!total) return '';
+
+      const parts = [...counts.entries()]
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .map(([code, n]) => {
+          // hasOwnProperty, not `RST_INFO[code] ||` — otherwise rst:"constructor"
+          // walks the prototype chain and renders "1 undefined".
+          const info = Object.prototype.hasOwnProperty.call(RST_INFO, code) ? RST_INFO[code] : null;
+          const text = n + ' ' + esc(info ? info.label : code);
+          return info && info.power ? '<span class="bad">' + text + '</span>' : text;
+        });
+      if (total > attributed) parts.push((total - attributed) + ' unattributed');
+
+      return '<div><span class="win">' + label + '</span> ' + total +
+             (total === 1 ? ' reboot · ' : ' reboots · ') + parts.join(' · ') + '</div>';
+    }
+
     // Rebuild outage intervals from the event log. Events are objects of the shape
-    // {t, type:'down'|'up', downMs, src, session}.
+    // {t, type:'down'|'up', downMs, src, session} plus, on device-observed 'up'
+    // events only, {reason, rst}.
     function outageIntervals(events, current, now) {
       const out = [];
       let openAt = null;
@@ -448,7 +528,8 @@
                     : (events.length ? events[0].t : now);
 
       el.innerHTML = statsRow('24h', DAY_MS, events, outages, now, since) +
-                     statsRow('7d', 7 * DAY_MS, events, outages, now, since);
+                     statsRow('7d', 7 * DAY_MS, events, outages, now, since) +
+                     rebootRow('7d', 7 * DAY_MS, events, now);
       el.hidden = false;
     }
 

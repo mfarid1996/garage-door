@@ -43,9 +43,15 @@ v2 requires ES modules, and `package.json` has no `"type": "module"`, so a `.js`
 
 This bit us once already: both stats functions shipped as v1 `.js`, `getStore()` threw on every call, and because `stats.js` caught the error and degraded to an empty payload, the UI showed a harmless-looking "No connectivity data yet" instead of an error. The `ready` flag now distinguishes the two.
 
-The device also reports `rst` (from `esp_reset_reason()`) in the `garage/session` payload, so a reboot can be attributed rather than guessed — `brownout` points at the power rail (the servo shares `VBUS`), `sw` is the firmware's own restart after a connect-budget overrun, `panic`/`taskwdt` is the watchdog, `poweron` is a real power cut. The field is additive: `parseSession()` in `poll-status.mjs` picks named fields off the parsed object and ignores the rest, so the deployed poller keeps working without a redeploy and `rst` is not yet surfaced in the UI.
+### Reboot attribution (`rst`)
 
-Events are `{t, type:'down'|'up', downMs, src:'device'|'poller', session}`. A post-boot reconnect is recorded as a zero-length outage: the *count* is right and no duration is invented. This means reboot downtime (~15–20 s each) is under-reported by design. Stats are hidden for `guest-` tokens.
+The device reports `rst` (from `esp_reset_reason()`) in the `garage/session` payload, so a reboot can be attributed rather than guessed — `brownout`/`pwrglitch` point at the power rail (the servo shares `VBUS` with no bulk capacitor), `sw` is the firmware's own restart after a connect-budget overrun, `panic`/`taskwdt` is the watchdog, `usb` is a re-flash, `poweron` is a real power cut. The PWA renders a third stats line: `7d · 3 reboots · 2 flash · 1 brownout`, with power-related causes in amber.
+
+**`esp_reset_reason()` is latched at boot and republished unchanged on every later reconnect.** So `rst` describes the *current* event only when `reason === 'boot'`. `makeUpMeta()` in `poll-status.mjs` enforces that gate — without it, one old brownout would be re-reported as a fresh brownout on every WiFi blip for as long as the board stayed up. It is attached only to the `'up'` event, so counting events that carry an `rst` counts reboots exactly once.
+
+Events are `{t, type:'down'|'up', downMs, src:'device'|'poller', session}`, plus `{reason, rst}` on device-observed `'up'` events. Both added fields are optional — stored events from before this change, and any event from older firmware, simply lack them and render as zero reboots rather than breaking.
+
+`parseSession`, `mkEvent` and `makeUpMeta` are named exports purely so they can be unit-tested; Netlify only consumes the default export. A post-boot reconnect is recorded as a zero-length outage: the *count* is right and no duration is invented. This means reboot downtime (~15–20 s each) is under-reported by design. Stats are hidden for `guest-` tokens.
 
 Token revocation = remove the token string from `VALID_TOKENS` in Netlify env vars, then redeploy (env changes do not reach deployed functions until the next deploy). There is no per-token identity or audit log; tokens are interchangeable shared secrets.
 

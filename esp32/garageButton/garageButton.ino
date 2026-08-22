@@ -78,11 +78,29 @@ uint32_t sessionCount = 0;
 // after a connect budget overrun ("sw"), a watchdog panic, or a genuine power cut.
 const char* resetReason = "unknown";
 
+// esp_reset_reason() reports ESP_RST_SW for BOTH our own ESP.restart() and a host
+// re-flash: the core's 1200bps-touch path ends in esp_restart() with no reason hint,
+// so the two are indistinguishable from the enum alone. That matters — "the board
+// restarted itself because WiFi kept failing" and "Mark just reflashed it" are
+// opposite diagnoses. RTC memory survives a software reset but not a power cycle, so
+// a magic value written immediately before our own restart separates them.
+RTC_NOINIT_ATTR uint32_t selfRestartMagic;
+const uint32_t SELF_RESTART_MAGIC = 0x9E7B0075;
+
+void selfRestart(const char* why) {
+  Serial.printf("%s — restarting\n", why);
+  selfRestartMagic = SELF_RESTART_MAGIC;
+  Serial.flush();
+  ESP.restart();
+}
+
 const char* resetReasonName() {
   switch (esp_reset_reason()) {
     case ESP_RST_POWERON:   return "poweron";   // cold start / power restored
     case ESP_RST_EXT:       return "ext";       // reset pin
-    case ESP_RST_SW:        return "sw";        // our ESP.restart() on a budget overrun
+    case ESP_RST_SW:        return selfRestartMagic == SELF_RESTART_MAGIC
+                                   ? "budget"     // our own restart, connect budget blown
+                                   : "hostreset"; // 1200bps touch — a re-flash
     case ESP_RST_PANIC:     return "panic";     // crash, incl. the task-WDT panic handler
     case ESP_RST_INT_WDT:   return "intwdt";
     case ESP_RST_TASK_WDT:  return "taskwdt";
@@ -114,29 +132,54 @@ bool          firstConnect = true;   // the connect that follows setup() is a "b
 // Attach only for the duration of a move, then release. The servo is powered from
 // VBUS with no bulk capacitor, so the less time it draws current the better: an
 // attached SG90 holds position with a live pulse train and hunts slightly forever,
-// while a detached one is limp and draws ~nothing. There is no mechanical preload
-// at rest, so gear friction holds the arm between actuations.
+// while a detached one is limp and draws ~nothing.
 //
-// attach() itself emits no pulse — it only configures the LEDC channel, leaving
-// duty at 0 — so re-attaching cannot twitch the arm toward the 90° default before
-// write() sets the real angle. (Verified in ESP32Servo 3.0.8: attach() calls
-// pwm.attachPin() and never ledcWrite().)
+// SAFETY PRECONDITION: this is only sound because there is no mechanical preload at
+// the rest angle — Mark verified that on the bench 2026-08-21, superseding the older
+// "pre-loaded toward trigger direction" note. A detached SG90 is held by gear
+// friction alone, and drift is one-sided in consequence: away from the button is
+// harmless, toward it opens a garage. If the linkage is ever re-mounted or given a
+// spring, revert to a permanently-attached servo before running it on a live door.
+//
+// Re-attaching does not twitch the arm, but NOT because the duty starts at zero:
+// ledcAttachChannel() reads the channel's existing duty back out of the peripheral
+// and restores it (esp32-hal-ledc.c), so a re-attach resumes the rest angle that was
+// last written. On a cold boot the duty genuinely is 0, which is what makes
+// servoPark() safe. Do not "simplify" this on the assumption that attach() is
+// always silent — after the first actuation it is not.
 //
 // To go back to a permanently-attached servo, drop the attach/detach pair here and
-// restore the servo.attach() in setup().
-void servoActuate() {
+// restore a plain servo.attach() in setup().
+//
+// Callers must confirm the attach took: writeTicks() silently no-ops while detached,
+// which would otherwise produce a cheerful ack for a door that never moved.
+//
+// Check attached(), NOT the return value of attach(). attach() returns the allocated
+// LEDC channel number and 0 on failure — and 0 is also a perfectly valid channel, so
+// `if (!servo.attach(...))` rejects a successful attach on channel 0. That is not
+// hypothetical: it is the first channel handed out, so it fires on every boot.
+bool servoActuate() {
   servo.attach(SERVO_PIN);
+  if (!servo.attached()) {
+    Serial.println("servo.attach FAILED — not actuating");
+    return false;
+  }
   servo.write(SERVO_TRIGGER_POS);
   delay(SERVO_MOVE_MS);   // let it physically arrive
   delay(SERVO_HOLD_MS);   // dwell on the button
   servo.write(SERVO_REST_POS);
   delay(SERVO_MOVE_MS);
   servo.detach();
+  return true;
 }
 
 // Park at the rest angle once at boot, then release.
 void servoPark() {
   servo.attach(SERVO_PIN);
+  if (!servo.attached()) {
+    Serial.println("servo.attach FAILED at boot — check SERVO_PIN");
+    return;
+  }
   servo.write(SERVO_REST_POS);
   delay(SERVO_MOVE_MS);
   servo.detach();
@@ -193,7 +236,11 @@ void onMessage(char* topic, byte* payload, unsigned int len) {
   snprintf(ackMsg, sizeof(ackMsg), "trigger received, uptime %lus", millis() / 1000);
   mqtt.publish("garage/ack", ackMsg);  // immediate ack on receive
 
-  servoActuate();
+  if (!servoActuate()) {
+    // The ack above already claimed receipt; correct the record so the PWA is not
+    // told "Garage confirmed" for a door that never moved.
+    mqtt.publish("garage/ack", "ERROR: servo attach failed - not actuated");
+  }
 
   // 3 quick flicker-offs against the solid-on baseline, ending back at solid on.
   for (int i = 0; i < 3; i++) {
@@ -221,8 +268,7 @@ void connectWiFi() {
 
   while (WiFi.status() != WL_CONNECTED) {
     if (millis() - start > WIFI_CONNECT_BUDGET_MS) {
-      Serial.println("\nWiFi connect budget exceeded — restarting");
-      ESP.restart();
+      selfRestart("\nWiFi connect budget exceeded");
     }
     // A stale pin can never associate, so it must not be allowed to consume the
     // whole budget — otherwise a router channel change bricks the board into a
@@ -231,7 +277,11 @@ void connectWiFi() {
       Serial.println("\nPinned BSSID/channel did not associate — falling back to a full scan");
       pinned = false;
       WiFi.disconnect();
-      WiFi.begin(WIFI_SSID, WIFI_PASS);
+      // Report a refused begin() rather than silently burning the rest of the budget
+      // and rebooting with no clue why the fallback never worked.
+      if (WiFi.begin(WIFI_SSID, WIFI_PASS) == WL_CONNECT_FAILED) {
+        Serial.println("WiFi.begin() refused the unpinned retry");
+      }
     }
     unsigned long now = millis();
     if (now - lastBlink >= LED_BLINK_WIFI_MS) {
@@ -261,8 +311,7 @@ void connectMQTT() {
 
   while (!mqtt.connected()) {
     if (millis() - start > MQTT_CONNECT_BUDGET_MS) {
-      Serial.println("MQTT connect budget exceeded — restarting");
-      ESP.restart();
+      selfRestart("MQTT connect budget exceeded");
     }
 
     if (firstAttempt || millis() - lastAttempt >= backoff) {
@@ -322,6 +371,8 @@ void setup() {
   // the one that matters here — it means the 3.3 V rail sagged, which on this
   // board points at the servo sharing VBUS rather than at anything in software.
   resetReason = resetReasonName();
+  // Consume the marker: whatever caused the NEXT boot must prove itself again.
+  selfRestartMagic = 0;
 
   // One NVS write per power-on / reset. Done before the network stages so the boot
   // is still counted if WiFi or MQTT blows its budget and forces a restart.
