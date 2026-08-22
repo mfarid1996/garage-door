@@ -503,9 +503,12 @@
       return Math.floor(h / 24) + 'd ' + String(h % 24).padStart(2, '0') + 'h';
     }
 
-    function statsRow(label, windowMs, events, outages, now, since) {
+    function statsRow(label, windowMs, events, outages, now, since, clicks) {
       const from  = now - windowMs;
       const drops = events.filter(e => e.type === 'down' && e.t >= from && e.t <= now).length;
+      // Recorded by record-click.mjs when the button is tapped. Counted here rather
+      // than stored per-window so the windows stay changeable without a redeploy.
+      const taps  = (clicks || []).filter(t => t >= from && t <= now).length;
 
       let downMs = 0;
       for (const o of outages) {
@@ -518,7 +521,8 @@
       // Say so when the log is younger than the window, so "0 drops" over 7d isn't
       // misread as a full week of perfect uptime.
       const covered = since > from ? ' (' + fmtDur(now - since) + ' of data)' : '';
-      return '<div><span class="win">' + label + '</span> ' + drops +
+      return '<div><span class="win">' + label + '</span> ' +
+             taps + (taps === 1 ? ' click · ' : ' clicks · ') + drops +
              (drops === 1 ? ' drop · ' : ' drops · ') + fmtDur(downMs) + ' down' + covered + '</div>';
     }
 
@@ -552,8 +556,10 @@
       const since   = typeof statsData.since === 'number' ? statsData.since
                     : (events.length ? events[0].t : now);
 
-      el.innerHTML = statsRow('24h', DAY_MS, events, outages, now, since) +
-                     statsRow('7d', 7 * DAY_MS, events, outages, now, since) +
+      const clicks = Array.isArray(statsData.clicks) ? statsData.clicks : [];
+
+      el.innerHTML = statsRow('24h', DAY_MS, events, outages, now, since, clicks) +
+                     statsRow('7d', 7 * DAY_MS, events, outages, now, since, clicks) +
                      rebootRow('7d', 7 * DAY_MS, events, now, since);
       el.hidden = false;
     }
@@ -622,6 +628,13 @@
 
       let resultClass = '', resultText = '', resultStatus = '';
       try {
+        // Telemetry only, deliberately not awaited and never allowed to throw: the
+        // door must open even if click recording is broken or slow.
+        fetch('/.netlify/functions/record-click', {
+          method: 'POST',
+          headers: { 'Authorization': 'Bearer ' + token },
+        }).catch(() => {});
+
         const res = await fetch('/.netlify/functions/trigger', {
           method: 'POST',
           headers: { 'Authorization': 'Bearer ' + token },

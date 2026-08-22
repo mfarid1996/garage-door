@@ -11,7 +11,23 @@ import { getStore } from '@netlify/blobs';
 
 const STORE_NAME = 'garage-stats';
 const STATE_KEY = 'state';
+const CLICKS_KEY = 'clicks';
 const RETENTION_MS = 8 * 24 * 60 * 60 * 1000;
+
+// Click timestamps live under their own key, written by record-click.mjs. Kept
+// separate from `state` on purpose: poll-status.mjs rewrites the whole `state` blob
+// every minute, so sharing one key would make every click race a poll and lose.
+const readClicks = async (store, now) => {
+  try {
+    const raw = await store.get(CLICKS_KEY, { type: 'json' });
+    if (!raw || !Array.isArray(raw.clicks)) return [];
+    return raw.clicks.filter(t => Number.isFinite(t) && t >= now - RETENTION_MS).sort((a, b) => a - b);
+  } catch {
+    // No clicks recorded yet, or the read failed. Absent is not an error here —
+    // the row simply reports 0 clicks.
+    return [];
+  }
+};
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -47,7 +63,8 @@ export default async (req) => {
       // Poller has never written anything yet (first deploy, or blobs empty).
       // `ready:true` distinguishes this from the error path below - the UI needs
       // to tell "nothing has happened yet" apart from "the backend is broken".
-      return json({ now, since: now, events: [], current: { state: 'unknown', since: null }, ready: true });
+      return json({ now, since: now, events: [], clicks: await readClicks(store, now),
+                    current: { state: 'unknown', since: null }, ready: true });
     }
 
     const cutoff = now - RETENTION_MS;
@@ -61,6 +78,7 @@ export default async (req) => {
       now,
       since: typeof state.since === 'number' ? state.since : now,
       events,
+      clicks: await readClicks(store, now),
       current: {
         state: current,
         since: current === 'unknown' || typeof state.statusSince !== 'number' ? null : state.statusSince,
@@ -77,6 +95,7 @@ export default async (req) => {
       now,
       since: now,
       events: [],
+      clicks: [],
       current: { state: 'unknown', since: null },
       ready: false,
       error: err && err.message ? err.message : 'unknown error',

@@ -1,4 +1,4 @@
-const CACHE = 'garage-v7';
+const CACHE = 'garage-v8';
 const STATIC_ASSETS = ['/manifest.json', '/icon.svg', '/sw.js'];
 const HTML_PATHS = ['/'];
 
