@@ -59,9 +59,27 @@ $bytes = New-Object byte[] 18; $rng.GetBytes($bytes)
 - **Power:** USB-C only. Do not use VIN.
 - **Servo:** SG90 (180° positional, not continuous rotation)
   - Brown/Black → `GND` (the one below D2) · Red → **`VBUS`** (below A7) · Orange/Yellow → **`D6`** (GPIO9)
-  - On trigger: rotates from 90° (rest) to 55°, holds 150 ms, returns to 90°, then **detaches** —
+  - On trigger: rotates from 50° (rest) to 15°, holds 150 ms, returns to 50°, then **detaches** —
     see the `SERVO_*` constants and `servoActuate()` in `garageButton.ino`
-  - Library: ESP32Servo (install via `arduino-cli lib install "ESP32Servo"`)
+  - **Driven with raw LEDC, not ESP32Servo** — see the warning below
+
+> ### ⚠️ ESP32Servo does not work on this board, and fails silently
+> Two faults compound on the Nano ESP32:
+> 1. The `nano_nora` variant's boot animation (`variant.cpp` `rgb_pulse_delay`) drives the RGB LED
+>    with `analogWrite()`, which configures LEDC timers at **1000 Hz** and never releases them.
+>    ESP32Servo keeps its own private channel bookkeeping, cannot see those, and hands the servo a
+>    channel whose timer is already at 1000 Hz. A servo needs a 20 ms frame; at 1 ms it sees nothing
+>    it recognises, so it does not move and does not even buzz.
+> 2. ESP32Servo ignores the return value of `ledcAttachChannel()`, and `Servo::attached()` only
+>    reports its own internal flag. So `attach()` "succeeds", `write()` does nothing, and the
+>    firmware acks a press that never happened.
+>
+> Measured on hardware: via ESP32Servo `ledcReadFreq(D6)` was **1000**; via raw LEDC it is **50**.
+> The firmware now frees the RGB LED's LEDC channels at boot, then calls
+> `ledcAttach(D6, 50, 14)` and **checks the return value**.
+>
+> The 14-bit width is pinned deliberately: **16-bit at 50 Hz is rejected outright** by the ESP32-S3
+> (`ledcAttach` returns false). Verified by probing 16/14/12/10 on hardware.
 
 > ### ⚠️ `VBUS` is not `VIN`
 > On the old dev board VIN was USB 5 V passthrough. On the Nano ESP32, **VIN is an input**
@@ -74,7 +92,7 @@ $bytes = New-Object byte[] 18; $rng.GetBytes($bytes)
 > API is an **Arduino** pin number. `13` means D13/GPIO48, not GPIO13; `2` means D2/GPIO5.
 > The old `#define SERVO_PIN 13` would not error — it would silently drive the wrong pin.
 > Always use the `Dn`/`An` constants. The remap is applied once inside the core's
-> `pinMode` / `digitalWrite` / `ledcAttach` macros, so ESP32Servo picks it up correctly too.
+> `pinMode` / `digitalWrite` / `ledcAttach` macros.
 >
 > Avoid for the servo signal: `D0`/`D1` (UART0 — D1 spews the boot log at every reset),
 > `A2` (GPIO3, JTAG strapping), and the RGB LED pins (GPIO0/45/46, strapping).
@@ -87,7 +105,7 @@ $bytes = New-Object byte[] 18; $rng.GetBytes($bytes)
 - **Arduino CLI:** v1.4.1, installed via `winget install ArduinoSA.CLI`
 - **ESP32 Arduino core:** `esp32:esp32`, version 3.3.8
 - **Board FQBN:** `esp32:esp32:nano_nora`
-- **Libraries:** PubSubClient 2.8.0, ESP32Servo 3.0.8
+- **Libraries:** PubSubClient 2.8.0 (ESP32Servo is NOT used — see the servo warning above)
 - **Node.js:** v24.15.0 (installed via winget)
 - **Netlify CLI:** v26.0.1 (installed via npm)
 

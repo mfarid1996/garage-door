@@ -1,7 +1,6 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
-#include <ESP32Servo.h>
 #include <esp_task_wdt.h>
 #include <esp_system.h>   // esp_reset_reason()
 #include <Preferences.h>
@@ -26,7 +25,32 @@
 #define LED_PIN   LED_BUILTIN
 #define SERVO_PIN D6
 
-Servo servo;
+// ── Servo drive: raw LEDC, deliberately NOT ESP32Servo ────────────────────────
+// ESP32Servo does not work on this board, and fails silently, which is worse than
+// failing. Two things go wrong on the Nano ESP32:
+//
+//  1. The nano_nora variant's boot animation (variant.cpp rgb_pulse_delay) drives
+//     the RGB LED with analogWrite(), which configures LEDC channels at 1000 Hz and
+//     never releases them. ESP32Servo keeps its own private channel bookkeeping,
+//     cannot see those, and hands the servo a channel whose timer is already at
+//     1000 Hz. A servo needs a 20 ms frame; at 1 ms it sees nothing it recognises,
+//     so it does not move and does not even buzz.
+//  2. ESP32Servo ignores the return value of ledcAttachChannel(), and
+//     Servo::attached() only reports its own attachedState flag. So attach()
+//     "succeeds", write() silently does nothing, and the firmware happily acks a
+//     press that never happened.
+//
+// Measured on hardware: via ESP32Servo, ledcReadFreq(D6) == 1000. Via the code
+// below, == 50. Freeing the RGB LED channels first is what makes room.
+//
+// 14-bit at 50 Hz is verified good on the ESP32-S3; 16-bit is rejected outright
+// (ledcAttach returns false), which is why the width is pinned rather than defaulted.
+const int      SERVO_LEDC_HZ   = 50;
+const int      SERVO_LEDC_BITS = 14;
+const uint32_t SERVO_US_MIN    = 500;    // pulse width at 0 deg
+const uint32_t SERVO_US_MAX    = 2400;   // pulse width at 180 deg
+const uint32_t SERVO_PERIOD_US = 1000000UL / SERVO_LEDC_HZ;
+
 WiFiClientSecure net;
 PubSubClient mqtt(net);
 
@@ -49,14 +73,12 @@ const int LED_BLINK_WIFI_MS = 100;   // fast blink while connecting WiFi
 const int LED_BLINK_MQTT_MS = 300;   // slower blink while connecting MQTT
 
 // Servo positions and timings — single-shot moves at full mechanical speed.
-// Both angles sit 45 deg further from the button than they used to (rest 45->90,
-// trigger 10->55). The stroke is unchanged in size and direction — still 35 deg
-// travelling toward decreasing angle — so the press itself behaves identically;
-// the whole pair has just been rotated away from the clicking direction. Rest is
-// now the servo's mechanical centre, which also keeps it well clear of the 0 deg
-// end stop that the range testing was probing.
-const int SERVO_REST_POS    = 90;   // resting / power-on angle (no mechanical preload here)
-const int SERVO_TRIGGER_POS = 55;   // angle held while the door opener button is "pressed"
+// History: originally 45/10, rotated 45 deg away from the button to 90/55, then
+// moved 40 deg back to 50/15 — so these now sit just 5 deg clear of the originals.
+// The stroke has been 35 deg toward decreasing angle throughout; only the pair's
+// offset has moved, so the press itself has always behaved the same.
+const int SERVO_REST_POS    = 50;   // resting / power-on angle (no mechanical preload here)
+const int SERVO_TRIGGER_POS = 15;   // angle held while the door opener button is "pressed"
 const int SERVO_HOLD_MS     = 150;  // dwell at the trigger position
 const int SERVO_MOVE_MS     = 200;  // worst-case time for the servo to physically arrive
 
@@ -157,38 +179,52 @@ bool          firstConnect = true;   // the connect that follows setup() is a "b
 // To go back to a permanently-attached servo, drop the attach/detach pair here and
 // restore a plain servo.attach() in setup().
 //
-// Callers must confirm the attach took: writeTicks() silently no-ops while detached,
-// which would otherwise produce a cheerful ack for a door that never moved.
-//
-// Check attached(), NOT the return value of attach(). attach() returns the allocated
-// LEDC channel number and 0 on failure — and 0 is also a perfectly valid channel, so
-// `if (!servo.attach(...))` rejects a successful attach on channel 0. That is not
-// hypothetical: it is the first channel handed out, so it fires on every boot.
-bool servoActuate() {
-  servo.attach(SERVO_PIN);
-  if (!servo.attached()) {
-    Serial.println("servo.attach FAILED — not actuating");
+// Hand back the LEDC channels the variant's RGB boot animation left attached. Done
+// once, before the first servo attach, so there is a free channel whose timer we
+// actually own. The variant leaves the pins driven HIGH (the RGB LED is active LOW,
+// so that is "off") and detaching LEDC from them does not disturb that.
+void servoFreeLedcChannels() {
+  ledcDetach(LED_RED);
+  ledcDetach(LED_GREEN);
+  ledcDetach(LED_BLUE);
+}
+
+void servoWriteAngle(int angle) {
+  if (angle < 0)   angle = 0;
+  if (angle > 180) angle = 180;
+  const uint32_t us = SERVO_US_MIN + (SERVO_US_MAX - SERVO_US_MIN) * (uint32_t)angle / 180;
+  const uint32_t maxDuty = 1UL << SERVO_LEDC_BITS;
+  ledcWrite(SERVO_PIN, (uint32_t)((uint64_t)us * maxDuty / SERVO_PERIOD_US));
+}
+
+// Unlike ESP32Servo's attach(), ledcAttach() reports real failure, so this guard
+// means something: a false here genuinely is "no pulse train will be produced".
+bool servoAttach() {
+  if (!ledcAttach(SERVO_PIN, SERVO_LEDC_HZ, SERVO_LEDC_BITS)) {
+    Serial.println("ledcAttach FAILED — no servo signal");
     return false;
   }
-  servo.write(SERVO_TRIGGER_POS);
+  return true;
+}
+
+bool servoActuate() {
+  if (!servoAttach()) return false;
+  servoWriteAngle(SERVO_TRIGGER_POS);
   delay(SERVO_MOVE_MS);   // let it physically arrive
   delay(SERVO_HOLD_MS);   // dwell on the button
-  servo.write(SERVO_REST_POS);
+  servoWriteAngle(SERVO_REST_POS);
   delay(SERVO_MOVE_MS);
-  servo.detach();
+  ledcDetach(SERVO_PIN);
   return true;
 }
 
 // Park at the rest angle once at boot, then release.
 void servoPark() {
-  servo.attach(SERVO_PIN);
-  if (!servo.attached()) {
-    Serial.println("servo.attach FAILED at boot — check SERVO_PIN");
-    return;
-  }
-  servo.write(SERVO_REST_POS);
+  servoFreeLedcChannels();
+  if (!servoAttach()) return;
+  servoWriteAngle(SERVO_REST_POS);
   delay(SERVO_MOVE_MS);
-  servo.detach();
+  ledcDetach(SERVO_PIN);
 }
 
 // Read-increment-write in one short open/close so a brownout mid-update cannot
@@ -245,7 +281,7 @@ void onMessage(char* topic, byte* payload, unsigned int len) {
   if (!servoActuate()) {
     // The ack above already claimed receipt; correct the record so the PWA is not
     // told "Garage confirmed" for a door that never moved.
-    mqtt.publish("garage/ack", "ERROR: servo attach failed - not actuated");
+    mqtt.publish("garage/ack", "ERROR: ledcAttach failed - no signal, not actuated");
   }
 
   // 3 quick flicker-offs against the solid-on baseline, ending back at solid on.
