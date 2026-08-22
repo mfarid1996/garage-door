@@ -1,0 +1,19 @@
+# Excluded from CLI (`netlify deploy`) uploads.
+#
+# THIS FILE EXISTS BECAUSE A CLI DEPLOY ONCE PUBLISHED secrets.h.
+#
+# Production is a git-linked build, so it only ever deploys files tracked in git and
+# secrets.h — being gitignored — was never in it. But `netlify deploy` from a laptop
+# uploads the publish directory verbatim and does NOT honour .gitignore, so the WiFi
+# PSK and MQTT credentials went live on a draft URL. Anyone with those can publish
+# garage/trigger directly and open the door with no token at all.
+#
+# The forced 404 redirects in netlify.toml are the second layer; this one keeps the
+# bytes off Netlify entirely. Do not remove either.
+esp32/
+docs/
+node_modules/
+*.md
+package.json
+package-lock.json
+deno.lock

@@ -33,6 +33,7 @@ const blankState = () => ({
   statusSince: null,  // epochMs we first observed the current status
   session: null,      // last seen garage/session session counter
   boots: null,        // last seen garage/session boots counter
+  bootsAttributed: null, // highest `boots` already reported on a recorded event
   events: [],
 });
 
@@ -114,8 +115,8 @@ const collectRetained = () => new Promise((resolve) => {
   client.on('error', (err) => finish(err.message));
 });
 
-const parseSession = (text) => {
-  const out = { session: null, boots: null, downMs: null, reason: null };
+export const parseSession = (text) => {
+  const out = { session: null, boots: null, downMs: null, reason: null, rst: null };
   if (!text) return out;
   try {
     const p = JSON.parse(text);
@@ -124,19 +125,56 @@ const parseSession = (text) => {
     if (Number.isFinite(p.boots)) out.boots = Math.trunc(p.boots);
     if (Number.isFinite(p.downMs)) out.downMs = Math.trunc(p.downMs);
     if (typeof p.reason === 'string') out.reason = p.reason;
+    // Absent on pre-Nano-ESP32 firmware; stays null and nothing downstream cares.
+    //
+    // WHITELISTED, not merely type-checked: this value is broker-controlled and ends
+    // up inside the PWA's DOM. Anyone able to publish a retained garage/session could
+    // otherwise store an <img onerror> here and steal the door token of every
+    // privileged viewer. resetReasonName() only ever emits short lowercase words, so
+    // nothing legitimate is lost. Defence in depth — the frontend escapes as well.
+    if (typeof p.rst === 'string' && /^[a-z]{2,12}$/.test(p.rst)) out.rst = p.rst;
   } catch {
     // Malformed retained payload: ignore it rather than throwing.
   }
   return out;
 };
 
-const mkEvent = (t, type, downMs, src, session) => ({
-  t: Math.trunc(t),
-  type,
-  downMs: downMs == null ? null : Math.trunc(downMs),
-  src,
-  session: session == null ? null : Math.trunc(session),
-});
+// `meta` carries the device's own account of a reconnect and is attached only to
+// the 'up' event, so counting events that have an `rst` counts reboots exactly once.
+//
+// The subtle part: esp_reset_reason() is LATCHED AT BOOT and the firmware republishes
+// it unchanged on every subsequent reconnect. So `rst` describes *this* event only
+// when reason === 'boot'. Attaching it to a wifi/mqtt reconnect would re-report a
+// single old brownout as one brownout per reconnect, forever.
+export const mkEvent = (t, type, downMs, src, session, meta = null) => {
+  const ev = {
+    t: Math.trunc(t),
+    type,
+    downMs: downMs == null ? null : Math.trunc(downMs),
+    src,
+    session: session == null ? null : Math.trunc(session),
+  };
+  if (meta && meta.reason) ev.reason = meta.reason;
+  if (meta && meta.rst) ev.rst = meta.rst;
+  if (meta && Number.isFinite(meta.reboots) && meta.reboots > 0) ev.reboots = meta.reboots;
+  return ev;
+};
+
+// The gate described above, isolated so it can be tested directly. Returns the meta
+// to hang on this reconnect's 'up' event, or null if there is nothing to say.
+//
+// `reboots` is the exact count from the device's monotonic NVS `boots` counter, and
+// it is what makes the tally honest. `rst` alone undercounts badly, because the
+// retained garage/session holds only the NEWEST connect:
+//   * boot, then a WiFi blip before the next poll -> newest reason is 'wifi', the
+//     gate correctly drops the stale latched rst, and the reboot vanishes entirely.
+//     That is the exact signature of a mains cut that also took the router down.
+//   * three brownout resets inside one poll interval -> one retained payload -> the
+//     reboot loop this feature exists to catch reads as a single reboot.
+// The counter survives both: it is differenced against what we last attributed, so
+// the total is right even when only the most recent cause is knowable.
+export const makeUpMeta = (deviceReconnect, reason, rst, reboots = null) =>
+  (deviceReconnect ? { reason, rst: reason === 'boot' ? rst : null, reboots } : null);
 
 // The log alternates down/up. Refusing a repeat of the last type makes the whole
 // function idempotent, which matters because Netlify can fire a scheduled
@@ -181,7 +219,7 @@ export default async () => {
     if (!state) return ok({ ok: false, reason: 'blob read failed' });
 
     const prevStatus = state.status;
-    const { session, boots, downMs, reason } = parseSession(obs.session);
+    const { session, boots, downMs, reason, rst } = parseSession(obs.session);
 
     // --- missed-poll accounting -------------------------------------------
     // Scheduled runs get delayed, skipped, or doubled by the platform. A gap
@@ -210,6 +248,25 @@ export default async () => {
     // had reset). Anything outside the retention window is nonsense - drop it.
     const exactDownMs = downMs != null && downMs >= 0 && downMs <= RETENTION_MS ? downMs : null;
 
+    // Reboots we have not yet attributed to an event. Deliberately differenced
+    // against `bootsAttributed` rather than `boots`: `boots` tracks the newest value
+    // merely SEEN, and a device that flaps up and back down inside one poll interval
+    // bumps it while still reading 'offline', where no 'up' event is recorded. Using
+    // `boots` there would consume the increment and lose those reboots for good.
+    // Falls back to `boots` for state written before this field existed.
+    const attributedBase = Number.isFinite(state.bootsAttributed) ? state.bootsAttributed
+                         : (Number.isFinite(state.boots) ? state.boots : null);
+    // A drop means NVS was erased (re-flash): resync silently rather than reporting
+    // a negative or absurd count.
+    const bootsDelta = boots != null && attributedBase != null && boots > attributedBase
+                     ? boots - attributedBase : null;
+
+    // Attached to whichever 'up' event this reconnect produces. Gated on
+    // deviceReconnect (not on src) because `src` records where the *duration* came
+    // from: a post-boot reconnect reports downMs -1, so its duration falls back to
+    // the poller while the reason for the reboot is still known exactly.
+    const upMeta = makeUpMeta(deviceReconnect, reason, rst, bootsDelta);
+
     const recorded = [];
     const record = (ev) => { if (push(events, ev)) recorded.push(ev); };
 
@@ -230,13 +287,13 @@ export default async () => {
           // Sub-minute blip that polling slept straight through. The device
           // measured it exactly, so we may backdate the start.
           record(mkEvent(now - exactDownMs, 'down', exactDownMs, 'device', session));
-          record(mkEvent(now, 'up', exactDownMs, 'device', session));
+          record(mkEvent(now, 'up', exactDownMs, 'device', session, upMeta));
         } else {
           // Reconnect confirmed but its duration is unknowable (post-boot).
           // Record a zero-length outage: the count is right and we never invent
           // a duration we cannot justify.
           record(mkEvent(now, 'down', null, 'device', session));
-          record(mkEvent(now, 'up', null, 'device', session));
+          record(mkEvent(now, 'up', null, 'device', session, upMeta));
         }
       }
     } else if (prevStatus === 'online' && curStatus === 'offline') {
@@ -244,14 +301,14 @@ export default async () => {
         // It blipped and then died again inside the gap: log the measured blip
         // first, then the outage we can see right now.
         record(mkEvent(now - exactDownMs, 'down', exactDownMs, 'device', session));
-        record(mkEvent(now, 'up', exactDownMs, 'device', session));
+        record(mkEvent(now, 'up', exactDownMs, 'device', session, upMeta));
       }
       record(mkEvent(now, 'down', null, 'poller', session));
     } else if (prevStatus === 'offline' && curStatus === 'online') {
       // It came back. If the device just told us exactly how long it was gone,
       // that beats our coarse poll timestamps.
       const useDevice = deviceReconnect && exactDownMs != null;
-      record(mkEvent(now, 'up', useDevice ? exactDownMs : null, useDevice ? 'device' : 'poller', session));
+      record(mkEvent(now, 'up', useDevice ? exactDownMs : null, useDevice ? 'device' : 'poller', session, upMeta));
     } else {
       // Still offline. A session bump here means it flapped up and back down
       // inside the gap; we cannot place those transitions in time, so the
@@ -266,6 +323,12 @@ export default async () => {
     kept.sort((a, b) => a.t - b.t);
     if (kept.length > MAX_EVENTS) kept = kept.slice(kept.length - MAX_EVENTS);
 
+    // Advance the attribution watermark only when a recorded event actually carried
+    // the count, so an unrecorded increment stays owed and is reported later.
+    const attributedNow = recorded.some(e => e.reboots) && boots != null
+                        ? boots
+                        : (attributedBase != null ? attributedBase : boots);
+
     const next = {
       v: 1,
       since: state.since ?? now,
@@ -274,6 +337,7 @@ export default async () => {
       statusSince: prevStatus === curStatus && state.statusSince != null ? state.statusSince : now,
       session: session != null ? session : state.session,
       boots: boots != null ? boots : state.boots,
+      bootsAttributed: attributedNow != null ? attributedNow : null,
       events: kept,
     };
 
@@ -285,6 +349,7 @@ export default async () => {
       session,
       boots,
       reason,
+      rst,
       downMs,
       missedPolls,
       recorded: recorded.length,
