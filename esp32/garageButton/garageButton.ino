@@ -49,8 +49,14 @@ const int LED_BLINK_WIFI_MS = 100;   // fast blink while connecting WiFi
 const int LED_BLINK_MQTT_MS = 300;   // slower blink while connecting MQTT
 
 // Servo positions and timings — single-shot moves at full mechanical speed.
-const int SERVO_REST_POS    = 45;   // resting / power-on angle (no mechanical preload here)
-const int SERVO_TRIGGER_POS = 10;   // angle held while the door opener button is "pressed"
+// Both angles sit 45 deg further from the button than they used to (rest 45->90,
+// trigger 10->55). The stroke is unchanged in size and direction — still 35 deg
+// travelling toward decreasing angle — so the press itself behaves identically;
+// the whole pair has just been rotated away from the clicking direction. Rest is
+// now the servo's mechanical centre, which also keeps it well clear of the 0 deg
+// end stop that the range testing was probing.
+const int SERVO_REST_POS    = 90;   // resting / power-on angle (no mechanical preload here)
+const int SERVO_TRIGGER_POS = 55;   // angle held while the door opener button is "pressed"
 const int SERVO_HOLD_MS     = 150;  // dwell at the trigger position
 const int SERVO_MOVE_MS     = 200;  // worst-case time for the servo to physically arrive
 

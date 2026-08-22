@@ -59,7 +59,7 @@ $bytes = New-Object byte[] 18; $rng.GetBytes($bytes)
 - **Power:** USB-C only. Do not use VIN.
 - **Servo:** SG90 (180° positional, not continuous rotation)
   - Brown/Black → `GND` (the one below D2) · Red → **`VBUS`** (below A7) · Orange/Yellow → **`D6`** (GPIO9)
-  - On trigger: rotates from 45° (rest) to 10°, holds 150 ms, returns to 45°, then **detaches** —
+  - On trigger: rotates from 90° (rest) to 55°, holds 150 ms, returns to 90°, then **detaches** —
     see the `SERVO_*` constants and `servoActuate()` in `garageButton.ino`
   - Library: ESP32Servo (install via `arduino-cli lib install "ESP32Servo"`)
 
