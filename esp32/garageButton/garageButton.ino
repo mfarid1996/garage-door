@@ -3,13 +3,28 @@
 #include <PubSubClient.h>
 #include <ESP32Servo.h>
 #include <esp_task_wdt.h>
+#include <esp_system.h>   // esp_reset_reason()
 #include <Preferences.h>
 #include "secrets.h"
 
-// ── Hardware ──────────────────────────────────────────────────────────────────
-// Blue LED on GPIO2. Red LED is hardwired to 3.3V (power indicator) — not GPIO-controllable.
-#define LED_PIN   2
-#define SERVO_PIN 13
+// ── Hardware — Arduino Nano ESP32 (u-blox NORA-W106 / ESP32-S3) ───────────────
+// These are ARDUINO pin numbers, NOT GPIO numbers. The nano_nora variant builds
+// with BOARD_HAS_PIN_REMAP, so a bare `13` would silently resolve to D13/GPIO48
+// (which is also SCK and the onboard LED) rather than GPIO13. Always use the
+// Dn/An constants here — the remap is applied once, inside the core's pinMode /
+// digitalWrite / ledcAttach macros.
+//   LED_BUILTIN → D13 → GPIO48, the onboard green LED. Active HIGH, so the
+//                 existing HIGH = on logic carries over unchanged. (The separate
+//                 RGB LED on this board is active LOW — do not use it here.)
+//   D6          → GPIO9, servo signal. A plain GPIO with no strapping or boot
+//                 function; D0/D1 are UART0 and spew the boot log at reset,
+//                 which would put garbage pulses on a servo line.
+//
+// Servo wiring: signal → D6, V+ → VBUS, GND → the GND pin below D2.
+// VBUS is the only 5 V source on this board and it is live ONLY when powered
+// over USB-C. VIN is an input (6–21 V) and will not source 5 V to the servo.
+#define LED_PIN   LED_BUILTIN
+#define SERVO_PIN D6
 
 Servo servo;
 WiFiClientSecure net;
@@ -23,11 +38,18 @@ const unsigned long WIFI_CONNECT_BUDGET_MS = 20000;
 const unsigned long MQTT_CONNECT_BUDGET_MS = 15000;
 const uint32_t      WDT_TIMEOUT_S          = 45;
 
+// The pinned channel/BSSID below skips the full scan and saves ~1–2 s per connect,
+// but it records one moment in time. If the router changes channel or the AP is
+// swapped, a pinned begin() can never associate and the board would reboot-loop on
+// WIFI_CONNECT_BUDGET_MS forever. So the pin gets a short window, then we fall back
+// to an unpinned scan for the rest of the budget.
+const unsigned long WIFI_PINNED_ATTEMPT_MS = 8000;
+
 const int LED_BLINK_WIFI_MS = 100;   // fast blink while connecting WiFi
 const int LED_BLINK_MQTT_MS = 300;   // slower blink while connecting MQTT
 
 // Servo positions and timings — single-shot moves at full mechanical speed.
-const int SERVO_REST_POS    = 45;   // resting / power-on angle (pre-loaded toward trigger direction)
+const int SERVO_REST_POS    = 45;   // resting / power-on angle (no mechanical preload here)
 const int SERVO_TRIGGER_POS = 10;   // angle held while the door opener button is "pressed"
 const int SERVO_HOLD_MS     = 150;  // dwell at the trigger position
 const int SERVO_MOVE_MS     = 200;  // worst-case time for the servo to physically arrive
@@ -51,6 +73,33 @@ const char* NVS_KEY_SESSION = "session";  // bumped on every successful MQTT con
 uint32_t bootCount    = 0;
 uint32_t sessionCount = 0;
 
+// Why the last reset happened. Reported alongside the counters so a reboot can be
+// attributed instead of guessed: a brownout (power/servo), our own ESP.restart()
+// after a connect budget overrun ("sw"), a watchdog panic, or a genuine power cut.
+const char* resetReason = "unknown";
+
+const char* resetReasonName() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:   return "poweron";   // cold start / power restored
+    case ESP_RST_EXT:       return "ext";       // reset pin
+    case ESP_RST_SW:        return "sw";        // our ESP.restart() on a budget overrun
+    case ESP_RST_PANIC:     return "panic";     // crash, incl. the task-WDT panic handler
+    case ESP_RST_INT_WDT:   return "intwdt";
+    case ESP_RST_TASK_WDT:  return "taskwdt";
+    case ESP_RST_WDT:       return "wdt";
+    case ESP_RST_BROWNOUT:  return "brownout";  // 3.3 V rail sagged — suspect servo on VBUS
+    case ESP_RST_PWR_GLITCH:return "pwrglitch"; // ditto, but a fast transient rather than a sag
+    case ESP_RST_CPU_LOCKUP:return "lockup";    // double exception
+    case ESP_RST_DEEPSLEEP: return "deepsleep";
+    case ESP_RST_SDIO:      return "sdio";
+    case ESP_RST_USB:       return "usb";       // host reset the USB-Serial/JTAG peripheral —
+                                                // i.e. a flash or an esptool reset, not a fault
+    case ESP_RST_JTAG:      return "jtag";
+    case ESP_RST_EFUSE:     return "efuse";
+    default:                return "unknown";
+  }
+}
+
 // millis() keeps running through a WiFi/MQTT drop as long as the board does not
 // reboot, so the outage can be measured exactly by timestamping the moment the
 // loss is observed. After a boot millis() has reset and the device genuinely
@@ -61,6 +110,37 @@ bool          gapOpen      = false;  // an outage is in progress, awaiting its r
 unsigned long gapStartMs   = 0;      // millis() when the loss was first observed
 bool          gapLostWiFi  = false;  // the radio dropped too, not just the MQTT session
 bool          firstConnect = true;   // the connect that follows setup() is a "boot"
+
+// Attach only for the duration of a move, then release. The servo is powered from
+// VBUS with no bulk capacitor, so the less time it draws current the better: an
+// attached SG90 holds position with a live pulse train and hunts slightly forever,
+// while a detached one is limp and draws ~nothing. There is no mechanical preload
+// at rest, so gear friction holds the arm between actuations.
+//
+// attach() itself emits no pulse — it only configures the LEDC channel, leaving
+// duty at 0 — so re-attaching cannot twitch the arm toward the 90° default before
+// write() sets the real angle. (Verified in ESP32Servo 3.0.8: attach() calls
+// pwm.attachPin() and never ledcWrite().)
+//
+// To go back to a permanently-attached servo, drop the attach/detach pair here and
+// restore the servo.attach() in setup().
+void servoActuate() {
+  servo.attach(SERVO_PIN);
+  servo.write(SERVO_TRIGGER_POS);
+  delay(SERVO_MOVE_MS);   // let it physically arrive
+  delay(SERVO_HOLD_MS);   // dwell on the button
+  servo.write(SERVO_REST_POS);
+  delay(SERVO_MOVE_MS);
+  servo.detach();
+}
+
+// Park at the rest angle once at boot, then release.
+void servoPark() {
+  servo.attach(SERVO_PIN);
+  servo.write(SERVO_REST_POS);
+  delay(SERVO_MOVE_MS);
+  servo.detach();
+}
 
 // Read-increment-write in one short open/close so a brownout mid-update cannot
 // leave the namespace held open.
@@ -84,12 +164,14 @@ void noteDisconnect(bool wifiLost) {
 }
 
 // Retained so a browser that loads mid-session still sees the last reconnect.
-// Hand-rolled with snprintf rather than pulling in ArduinoJson for four fields.
+// Hand-rolled with snprintf rather than pulling in ArduinoJson for five fields.
+// `rst` is additive: poll-status.mjs picks named fields off the parsed object and
+// ignores the rest, so an older deployed poller keeps working untouched.
 void publishSession(const char* reason, long downMs) {
-  char json[96];
+  char json[160];
   snprintf(json, sizeof(json),
-           "{\"session\":%lu,\"boots\":%lu,\"downMs\":%ld,\"reason\":\"%s\"}",
-           (unsigned long)sessionCount, (unsigned long)bootCount, downMs, reason);
+           "{\"session\":%lu,\"boots\":%lu,\"downMs\":%ld,\"reason\":\"%s\",\"rst\":\"%s\"}",
+           (unsigned long)sessionCount, (unsigned long)bootCount, downMs, reason, resetReason);
   mqtt.publish("garage/session", json, true);
   Serial.printf("Session published: %s\n", json);
 }
@@ -111,11 +193,7 @@ void onMessage(char* topic, byte* payload, unsigned int len) {
   snprintf(ackMsg, sizeof(ackMsg), "trigger received, uptime %lus", millis() / 1000);
   mqtt.publish("garage/ack", ackMsg);  // immediate ack on receive
 
-  servo.write(SERVO_TRIGGER_POS);
-  delay(SERVO_MOVE_MS);
-  delay(SERVO_HOLD_MS);
-  servo.write(SERVO_REST_POS);
-  delay(SERVO_MOVE_MS);
+  servoActuate();
 
   // 3 quick flicker-offs against the solid-on baseline, ending back at solid on.
   for (int i = 0; i < 3; i++) {
@@ -127,8 +205,10 @@ void onMessage(char* topic, byte* payload, unsigned int len) {
 }
 
 void connectWiFi() {
+  bool pinned = false;
 #ifdef WIFI_CHANNEL
   WiFi.begin(WIFI_SSID, WIFI_PASS, WIFI_CHANNEL, WIFI_BSSID);
+  pinned = true;
 #else
   WiFi.begin(WIFI_SSID, WIFI_PASS);
 #endif
@@ -143,6 +223,15 @@ void connectWiFi() {
     if (millis() - start > WIFI_CONNECT_BUDGET_MS) {
       Serial.println("\nWiFi connect budget exceeded — restarting");
       ESP.restart();
+    }
+    // A stale pin can never associate, so it must not be allowed to consume the
+    // whole budget — otherwise a router channel change bricks the board into a
+    // reboot loop. Give up on it early and let the remaining budget cover a scan.
+    if (pinned && millis() - start > WIFI_PINNED_ATTEMPT_MS) {
+      Serial.println("\nPinned BSSID/channel did not associate — falling back to a full scan");
+      pinned = false;
+      WiFi.disconnect();
+      WiFi.begin(WIFI_SSID, WIFI_PASS);
     }
     unsigned long now = millis();
     if (now - lastBlink >= LED_BLINK_WIFI_MS) {
@@ -226,13 +315,18 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   digitalWrite(LED_PIN, LOW);
 
-  servo.attach(SERVO_PIN);
-  servo.write(SERVO_REST_POS);
+  servoPark();
+
+  // Latched once: esp_reset_reason() is stable for the life of the boot, and the
+  // session payload wants it long after setup() has returned. ESP_RST_BROWNOUT is
+  // the one that matters here — it means the 3.3 V rail sagged, which on this
+  // board points at the servo sharing VBUS rather than at anything in software.
+  resetReason = resetReasonName();
 
   // One NVS write per power-on / reset. Done before the network stages so the boot
   // is still counted if WiFi or MQTT blows its budget and forces a restart.
   bootCount = bumpCounter(NVS_KEY_BOOTS);
-  Serial.printf("\nBoot #%lu\n", (unsigned long)bootCount);
+  Serial.printf("\nBoot #%lu (reset reason: %s)\n", (unsigned long)bootCount, resetReason);
 
   // Reconfigure the auto-initialised watchdog with our timeout and add the loop task.
   esp_task_wdt_config_t wdt_config = {

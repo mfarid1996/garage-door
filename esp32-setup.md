@@ -50,14 +50,35 @@ $bytes = New-Object byte[] 18; $rng.GetBytes($bytes)
 
 ## Hardware
 
-- **Board:** ESP32-D0WD-V3 (revision v3.1), dual-core 240MHz
-- **USB-serial chip:** CH340 (VID_1A86 / PID_7523)
-- **Built-in LED:** GPIO2
-- **Amazon listing:** https://www.amazon.com/dp/B0B18JQF16
+- **Board:** Arduino Nano ESP32 (ABX00083) — u-blox NORA-W106-10B module, ESP32-S3 dual-core
+  240 MHz, 512 KB SRAM + 8 MB PSRAM, 16 MB flash, certified internal antenna
+- **USB:** native USB-C on the ESP32-S3 itself — **no CH340**. See the port gotcha below.
+- **Built-in LED:** `LED_BUILTIN` = D13 = GPIO48, active HIGH (HIGH = lit).
+  The separate RGB LED (`LED_RED`/`LED_GREEN`/`LED_BLUE` = GPIO46/0/45) is **active LOW**
+  and sits on strapping pins — the firmware does not use it.
+- **Power:** USB-C only. Do not use VIN.
 - **Servo:** SG90 (180° positional, not continuous rotation)
-  - Black → GND, Red → VIN (5V), Yellow → GPIO13
-  - On trigger: rotates from 45° (rest) to 10°, holds 150 ms, returns to 45° — see the `SERVO_*` constants in `garageButton.ino`
+  - Brown/Black → `GND` (the one below D2) · Red → **`VBUS`** (below A7) · Orange/Yellow → **`D6`** (GPIO9)
+  - On trigger: rotates from 45° (rest) to 10°, holds 150 ms, returns to 45°, then **detaches** —
+    see the `SERVO_*` constants and `servoActuate()` in `garageButton.ino`
   - Library: ESP32Servo (install via `arduino-cli lib install "ESP32Servo"`)
+
+> ### ⚠️ `VBUS` is not `VIN`
+> On the old dev board VIN was USB 5 V passthrough. On the Nano ESP32, **VIN is an input**
+> (6–21 V into the buck) and sources nothing. `VBUS` is the only 5 V available, and it is live
+> **only while the board is powered over USB-C** — power the board from VIN and the servo dies.
+> Do not run the servo from `3V3`: the SG90 wants 4.8–6 V and that rail also feeds the S3.
+
+> ### ⚠️ Arduino pin numbers ≠ GPIO numbers
+> The `nano_nora` variant builds with `BOARD_HAS_PIN_REMAP`, so a bare integer in the Arduino
+> API is an **Arduino** pin number. `13` means D13/GPIO48, not GPIO13; `2` means D2/GPIO5.
+> The old `#define SERVO_PIN 13` would not error — it would silently drive the wrong pin.
+> Always use the `Dn`/`An` constants. The remap is applied once inside the core's
+> `pinMode` / `digitalWrite` / `ledcAttach` macros, so ESP32Servo picks it up correctly too.
+>
+> Avoid for the servo signal: `D0`/`D1` (UART0 — D1 spews the boot log at every reset),
+> `A2` (GPIO3, JTAG strapping), and the RGB LED pins (GPIO0/45/46, strapping).
+> `D2`–`D10` are plain GPIOs and safe.
 
 ---
 
@@ -65,8 +86,8 @@ $bytes = New-Object byte[] 18; $rng.GetBytes($bytes)
 
 - **Arduino CLI:** v1.4.1, installed via `winget install ArduinoSA.CLI`
 - **ESP32 Arduino core:** `esp32:esp32`, version 3.3.8
-- **Board FQBN:** `esp32:esp32:esp32`
-- **Libraries:** PubSubClient 2.8.0, ESP32Servo
+- **Board FQBN:** `esp32:esp32:nano_nora`
+- **Libraries:** PubSubClient 2.8.0, ESP32Servo 3.0.8
 - **Node.js:** v24.15.0 (installed via winget)
 - **Netlify CLI:** v26.0.1 (installed via npm)
 
@@ -76,13 +97,26 @@ First, copy `esp32/garageButton/secrets.h.example` to `esp32/garageButton/secret
 
 ```powershell
 arduino-cli board list    # find the port — see the warning below
-arduino-cli compile --fqbn esp32:esp32:esp32 "<path-to-repo>\esp32\garageButton"
-arduino-cli upload --fqbn esp32:esp32:esp32 --port COM3 "<path-to-repo>\esp32\garageButton"
+arduino-cli compile --fqbn esp32:esp32:nano_nora "<path-to-repo>\esp32\garageButton"
+arduino-cli upload --fqbn esp32:esp32:nano_nora --port COM5 "<path-to-repo>\esp32\garageButton"
 ```
 
-**The COM port moves.** Windows assigns it per physical USB socket, so plugging the board into a
-different port changes the number (it has been COM5 and COM3 at different times). Always run
-`arduino-cli board list` first and use the port on the `USB-SERIAL CH340` row.
+**The COM port moves — and now it also disappears.** Windows still assigns it per physical USB
+socket, but the Nano ESP32 enumerates its serial port from the ESP32-S3 itself rather than from a
+CH340 bridge, so the port **vanishes and re-enumerates across every reset and upload**. Two
+consequences:
+
+- `arduino-cli board list` now identifies the board on its VID/PID (`0x2341`/`0x0070`,
+  shown as `Arduino Nano ESP32`) — there is no `USB-SERIAL CH340` row any more.
+- **The default DFU upload path does not work on this machine.** `arduino-cli upload` without a
+  programmer fails with `Cannot open DFU device 2341:0070 (LIBUSB_ERROR_NOT_FOUND)` — the DFU
+  interface has no WinUSB driver bound. Use the **`-P esptool`** programmer instead, as shown above.
+- **Upload is a two-port dance.** `-P esptool` does a 1200 bps touch that reboots the board into the
+  ROM bootloader, which enumerates as a *different* COM port. The first attempt therefore fails with
+  `OSError(22) ... A device which does not exist was specified` — that is expected, not a fault.
+  Re-run `arduino-cli board list`, find the `ESP32 Family Device` row (COM4 here), and upload to
+  **that** port. After flashing it hard-resets back to the sketch port (COM5).
+- If the board is not found at all, force DFU by **double-tapping the white RST button**.
 
 `compile` needs no board attached — only `upload` does.
 
@@ -113,7 +147,7 @@ netlify deploy --prod
   | `garage/trigger` | no | Netlify Function | `1` = press the button |
   | `garage/ack` | no | ESP32 | trigger received / cooldown-ignored |
   | `garage/status` | **yes** | ESP32 (+ LWT) | `online` / `offline` |
-  | `garage/session` | **yes** | ESP32 | `{session, boots, downMs, reason}` on every MQTT connect |
+  | `garage/session` | **yes** | ESP32 | `{session, boots, downMs, reason, rst}` on every MQTT connect |
 - Credentials go in `secrets.h` (ESP32) and Netlify env vars (`MQTT_HOST`, `MQTT_USER`, `MQTT_PASS`)
 - If you rotate the MQTT password, update both Netlify env vars and re-flash the ESP32
 
@@ -146,7 +180,27 @@ Set these in the Netlify dashboard for the `garage-door-mfarid` project:
 ## Gotchas
 
 1. **SSID case sensitivity** — WiFi.begin() silently fails with status 6 (WL_DISCONNECTED) if the case is wrong.
-2. **CH340 resets on serial open** — Opening COM port toggles DTR, rebooting the board. Set `DtrEnable = false` in PowerShell if you don't want a reset.
+2. **Never open the serial port with DTR asserted** — this is the big one on the Nano ESP32.
+   The port is the S3's own native USB-Serial/JTAG peripheral, so asserting DTR on open drops the
+   board into the **ROM bootloader**, where it sits silently forever: no sketch, no WiFi, no MQTT,
+   and the broker fires the LWT so the dashboard just says `offline`. It looks exactly like a
+   firmware hang. Diagnose it with `arduino-cli board list`:
+
+   | Reported board name  | Port | Meaning                     |
+   |----------------------|------|-----------------------------|
+   | `Arduino Nano ESP32` | COM5 | sketch is running — healthy |
+   | `ESP32 Family Device`| COM4 | stuck in the ROM bootloader |
+
+   Set `DtrEnable = $false` **and** `RtsEnable = $false` before `.Open()`. To get a board back out
+   of the bootloader without unplugging it:
+
+   ```powershell
+   & "$env:LOCALAPPDATA\Arduino15\packages\esp32\tools\esptool_py\5.2.0\esptool.exe" --port COM4 --chip esp32s3 run
+   ```
+
+   Note the **port number differs between the two modes** (COM5 running vs COM4 bootloader), because
+   they enumerate as different USB devices. The port also vanishes and re-enumerates on every reset,
+   so a serial reader must reopen rather than assume a stable handle.
 3. **Serial output timing** — setup() runs immediately at boot. `delay(3000)` at the start of setup() gives time to open the serial monitor.
 4. **PATH refresh in PowerShell** — After installing tools via winget/npm, refresh PATH:
    ```powershell
